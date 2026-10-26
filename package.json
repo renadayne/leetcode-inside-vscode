@@ -1,0 +1,44 @@
+{
+  "name": "leetcode-inside-vscode",
+  "displayName": "LeetCode Inside VS Code",
+  "description": "Personal C++ practice using LeetCode's remote runner and judge.",
+  "version": "0.1.0",
+  "publisher": "personal-tools",
+  "license": "MIT",
+  "engines": { "vscode": "^1.93.0" },
+  "categories": ["Education"],
+  "extensionKind": ["ui"],
+  "main": "./src/extension.js",
+  "activationEvents": ["onStartupFinished"],
+  "capabilities": { "untrustedWorkspaces": { "supported": true }, "virtualWorkspaces": false },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "check": "node scripts/check.js",
+    "smoke:live": "node scripts/smoke-live.js",
+    "package": "python3 scripts/package.py"
+  },
+  "contributes": {
+    "commands": [
+      { "command": "lc.connect", "title": "LeetCode: Connect Account" },
+      { "command": "lc.disconnect", "title": "LeetCode: Disconnect Account" },
+      { "command": "lc.account", "title": "LeetCode: Check Account Status" },
+      { "command": "lc.open", "title": "LeetCode: Open Problem" },
+      { "command": "lc.recent", "title": "LeetCode: Reopen Local Problem" },
+      { "command": "lc.description", "title": "LeetCode: Show Problem Description" },
+      { "command": "lc.run", "title": "LeetCode: Run Examples on LeetCode", "icon": "$(play)" },
+      { "command": "lc.custom", "title": "LeetCode: Edit Custom Test Input" },
+      { "command": "lc.runCustom", "title": "LeetCode: Run Custom Input on LeetCode" },
+      { "command": "lc.submit", "title": "LeetCode: Submit to LeetCode", "icon": "$(cloud-upload)" },
+      { "command": "lc.resume", "title": "LeetCode: Retrieve Pending Result" },
+      { "command": "lc.clearPending", "title": "LeetCode: Clear Pending Operation" },
+      { "command": "lc.results", "title": "LeetCode: Show Results" },
+      { "command": "lc.folder", "title": "LeetCode: Open Local Solutions Folder" }
+    ],
+    "menus": {
+      "editor/title": [
+        { "command": "lc.run", "when": "resourceScheme == file && resourceExtname == .cpp && lc.isSolution", "group": "navigation@1" },
+        { "command": "lc.submit", "when": "resourceScheme == file && resourceExtname == .cpp && lc.isSolution", "group": "navigation@2" }
+      ]
+    }
+  }
+}
