@@ -7,6 +7,7 @@ const { Jobs } = require('./jobs');
 const { description, formatResult } = require('./render');
 const { DiscoveryState } = require('./discovery');
 const { LeetCodeExplorer } = require('./explorer');
+const { LeetCodeDashboard } = require('./dashboard');
 const SECRET = 'leetcode.session.v1';
 
 async function createController(vscode, context, dependencies = {}) {
@@ -24,13 +25,43 @@ async function createController(vscode, context, dependencies = {}) {
   let connecting = false;
   let internalSecretWrite = false;
   let explorer;
+  let dashboard;
 
   const discovery = dependencies.discovery || new DiscoveryState(api, context.globalState, () => {
-    if (!disposed && explorer) explorer.refresh();
+    if (!disposed) {
+      if (explorer) explorer.refresh();
+      if (dashboard && dashboard.isOpen) dashboard.refresh();
+    }
   });
   explorer = dependencies.explorer || new LeetCodeExplorer(vscode, discovery, async () => {
     registered = await store.problems();
     return registered;
+  });
+  const mediaRoot = context.extensionUri?.fsPath
+    ? path.join(context.extensionUri.fsPath, 'media')
+    : (context.extensionPath ? path.join(context.extensionPath, 'media') : path.resolve(__dirname, '..', 'media'));
+  dashboard = dependencies.dashboard || new LeetCodeDashboard(vscode, context, {
+    discovery,
+    mediaRoot,
+    getLocalProblems: async () => {
+      registered = await store.problems();
+      return registered;
+    },
+    getCurrentProblem: async () => {
+      const uri = vscode.window.activeTextEditor?.document?.uri;
+      if (isRegistered(uri)) {
+        try {
+          const q = await store.registered(uri.fsPath);
+          return { ...q, fileName: path.basename(uri.fsPath) };
+        } catch {
+          // Fall back to current problem in memory
+        }
+      }
+      if (current) {
+        return { ...current, fileName: path.basename(store.file(current)) };
+      }
+      return undefined;
+    }
   });
 
   const initialSecret = await context.secrets.get(SECRET);
@@ -205,6 +236,7 @@ async function createController(vscode, context, dependencies = {}) {
     const solutionColumn = visible?.viewColumn && visible.viewColumn !== panel.viewColumn ? visible.viewColumn : vscode.ViewColumn.Beside;
     await vscode.window.showTextDocument(doc, { viewColumn: solutionColumn, preview: false });
     lenses.fire();
+    if (dashboard && dashboard.isOpen) dashboard.refresh();
     await context.globalState.update('lastProblem', q.titleSlug);
   }
 
@@ -491,8 +523,10 @@ async function createController(vscode, context, dependencies = {}) {
 
   async function updateEditorContext(editor) {
     await vscode.commands.executeCommand('setContext', 'lc.isSolution', isRegistered(editor?.document.uri));
+    if (dashboard && dashboard.isOpen) dashboard.refresh();
   }
 
+  command('lc.openGUI', () => dashboard.open());
   command('lc.connect', connect);
   command('lc.openSignIn', openSignIn);
   command('lc.importSession', importSession);
@@ -527,6 +561,7 @@ async function createController(vscode, context, dependencies = {}) {
     registered = await store.problems();
     await discovery.refreshAll();
     explorer.refresh();
+    if (dashboard && dashboard.isOpen) await dashboard.refresh();
   });
   command('lc.refreshDaily', () => discovery.refreshDaily());
   command('lc.refreshCatalog', () => discovery.refreshCatalog());
@@ -585,7 +620,7 @@ async function createController(vscode, context, dependencies = {}) {
     }));
   }
 
-  context.subscriptions.push(output, status, lenses, explorer,
+  context.subscriptions.push(output, status, lenses, explorer, dashboard,
     vscode.window.onDidChangeActiveTextEditor(e => { updateEditorContext(e).catch(report); }),
     vscode.languages.registerCodeLensProvider({ scheme: 'file', language: 'cpp' }, {
       onDidChangeCodeLenses: lenses.event,
@@ -608,6 +643,8 @@ async function createController(vscode, context, dependencies = {}) {
     jobs,
     discovery,
     explorer,
+    dashboard,
+    openGUI: () => dashboard.open(),
     capture,
     run,
     connect,

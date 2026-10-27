@@ -1,0 +1,336 @@
+:root {
+  color-scheme: light dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 16px 20px 40px;
+  color: var(--vscode-editor-foreground);
+  background-color: var(--vscode-editor-background);
+  font-family: var(--vscode-font-family, sans-serif);
+  font-size: var(--vscode-font-size, 13px);
+  line-height: 1.5;
+}
+
+.lc-dashboard {
+  max-width: 1080px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.lc-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--vscode-panel-border, var(--vscode-contrastBorder, #444));
+}
+
+.lc-title-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.lc-title {
+  margin: 0;
+  font-size: 1.35em;
+  font-weight: 600;
+}
+
+.lc-subtitle {
+  margin: 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.92em;
+}
+
+.lc-account-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 0.88em;
+  background-color: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+  border: 1px solid var(--vscode-contrastBorder, transparent);
+}
+
+.lc-current-problem {
+  padding: 12px 14px;
+  border-radius: 6px;
+  background-color: var(--vscode-sideBar-background, var(--vscode-editor-background));
+  border: 1px solid var(--vscode-panel-border, var(--vscode-contrastBorder, #444));
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.lc-current-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.lc-current-title {
+  font-weight: 600;
+}
+
+.lc-current-file {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.9em;
+  color: var(--vscode-descriptionForeground);
+}
+
+.lc-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.lc-btn {
+  appearance: none;
+  border: 1px solid var(--vscode-contrastBorder, transparent);
+  background-color: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+  font-family: inherit;
+  font-size: 0.92em;
+  padding: 5px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.lc-btn:hover:not(:disabled) {
+  background-color: var(--vscode-button-hoverBackground);
+}
+
+.lc-btn:focus-visible,
+.lc-tab:focus-visible,
+.lc-details summary:focus-visible {
+  outline: 2px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
+}
+
+.lc-btn-secondary {
+  background-color: var(--vscode-button-secondaryBackground, transparent);
+  color: var(--vscode-button-secondaryForeground, var(--vscode-editor-foreground));
+  border: 1px solid var(--vscode-panel-border, var(--vscode-contrastBorder, #555));
+}
+
+.lc-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.lc-details {
+  display: inline-block;
+}
+
+.lc-details summary {
+  cursor: pointer;
+  padding: 5px 10px;
+  border-radius: 4px;
+  font-size: 0.92em;
+  color: var(--vscode-descriptionForeground);
+  border: 1px solid var(--vscode-panel-border, var(--vscode-contrastBorder, transparent));
+}
+
+.lc-more-menu {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.lc-notice {
+  padding: 10px 12px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--vscode-inputValidation-infoBorder, var(--vscode-panel-border, #555));
+  background-color: var(--vscode-inputValidation-infoBackground, rgba(0, 122, 204, 0.12));
+}
+
+.lc-notice-error {
+  border-color: var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground, #f48771));
+  background-color: var(--vscode-inputValidation-errorBackground, rgba(244, 135, 113, 0.14));
+}
+
+.lc-notice-warning {
+  border-color: var(--vscode-inputValidation-warningBorder, #cca700);
+  background-color: var(--vscode-inputValidation-warningBackground, rgba(204, 167, 0, 0.14));
+}
+
+.lc-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  border-bottom: 1px solid var(--vscode-panel-border, var(--vscode-contrastBorder, #444));
+  padding-bottom: 6px;
+}
+
+.lc-tab {
+  appearance: none;
+  background: transparent;
+  color: var(--vscode-descriptionForeground);
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 6px 14px;
+  font-family: inherit;
+  font-size: 0.96em;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.lc-tab[aria-selected="true"] {
+  color: var(--vscode-editor-foreground);
+  background-color: var(--vscode-sideBar-background, rgba(128, 128, 128, 0.15));
+  border-color: var(--vscode-focusBorder, var(--vscode-contrastActiveBorder, #007acc));
+  font-weight: 600;
+}
+
+.lc-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.lc-panel[hidden] {
+  display: none !important;
+}
+
+.lc-card {
+  padding: 14px 16px;
+  border-radius: 6px;
+  border: 1px solid var(--vscode-panel-border, var(--vscode-contrastBorder, #444));
+  background-color: var(--vscode-editor-background);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.lc-card-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.lc-card-title {
+  margin: 0;
+  font-size: 1.08em;
+  font-weight: 600;
+}
+
+.lc-muted {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.92em;
+  margin: 0;
+}
+
+.lc-badge-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.lc-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.84em;
+  background-color: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.16));
+  color: var(--vscode-editor-foreground);
+  border: 1px solid var(--vscode-contrastBorder, transparent);
+}
+
+.lc-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.lc-list-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 4px;
+  border: 1px solid var(--vscode-panel-border, var(--vscode-contrastBorder, #333));
+}
+
+.lc-item-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 180px;
+  flex: 1 1 auto;
+}
+
+.lc-item-title {
+  font-weight: 500;
+}
+
+.lc-item-meta {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.88em;
+}
+
+.lc-status-box {
+  padding: 12px;
+  border-radius: 4px;
+  background-color: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.1));
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.lc-status-error {
+  border: 1px solid var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground, #f48771));
+  background-color: var(--vscode-inputValidation-errorBackground, rgba(244, 135, 113, 0.12));
+}
+
+@media (max-width: 640px) {
+  body {
+    padding: 12px 10px 28px;
+  }
+
+  .lc-header,
+  .lc-current-header,
+  .lc-card-header,
+  .lc-list-item {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .lc-tabs {
+    flex-direction: column;
+  }
+
+  .lc-tab {
+    width: 100%;
+    text-align: left;
+  }
+}

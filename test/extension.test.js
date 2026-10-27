@@ -7,6 +7,7 @@ const path = require('node:path');
 const {createController} = require('../src/extension');
 const {Store} = require('../src/store');
 const {LeetCodeClient, LcError} = require('../src/api');
+const {validateDashboardMessage} = require('../src/dashboard');
 
 const q={questionId:'101',questionFrontendId:'1',title:'Two Sum',titleSlug:'two-sum',difficulty:'Easy',isPaidOnly:false,status:null,topicTags:[{name:'Array',slug:'array'}],content:'<p>Problem</p>',starter:'class Solution {};',exampleTestcases:'[2,7]\n9',enableRunCode:true};
 const disposable=()=>({dispose(){}});
@@ -52,7 +53,49 @@ function fakeVSCode() {
         return items[pick];
       },
       async withProgress(_,fn){return fn({report(){}},{isCancellationRequested:false});},
-      createWebviewPanel(_,title,col){const p={title,viewColumn:col,webview:{html:''},onDidDispose(){return disposable();},reveal(){},dispose(){}};panels.push(p);return p;},
+      createWebviewPanel(viewType,title,col,options={}){
+        const messageListeners=new Set();
+        const disposeListeners=new Set();
+        const postedMessages=[];
+        let isDisposed=false;
+        let revealCalls=0;
+        let htmlContent='';
+        let htmlWrites=0;
+        const p={
+          viewType,
+          title,
+          viewColumn:col,
+          options,
+          postedMessages,
+          get htmlWriteCount(){return htmlWrites;},
+          get messageListenerCount(){return messageListeners.size;},
+          get disposeListenerCount(){return disposeListeners.size;},
+          get revealCount(){return revealCalls;},
+          get disposed(){return isDisposed;},
+          webview:{
+            get html(){return htmlContent;},
+            set html(value){htmlContent=String(value);htmlWrites++;},
+            cspSource:'vscode-webview-resource://test-csp',
+            asWebviewUri(uri){return {toString:()=>`vscode-webview-resource://test-csp/${path.basename(uri.fsPath)}`};},
+            async postMessage(msg){postedMessages.push(msg);return true;},
+            onDidReceiveMessage(fn){messageListeners.add(fn);return {dispose(){messageListeners.delete(fn);}};}
+          },
+          async emitMessage(msg){
+            const results=[];
+            for(const fn of [...messageListeners])results.push(await fn(msg));
+            return results;
+          },
+          onDidDispose(fn){disposeListeners.add(fn);return {dispose(){disposeListeners.delete(fn);}};},
+          reveal(nextCol){revealCalls++;if(nextCol!==undefined)this.viewColumn=nextCol;},
+          dispose(){
+            if(isDisposed)return;
+            isDisposed=true;
+            for(const fn of [...disposeListeners])fn();
+          }
+        };
+        panels.push(p);
+        return p;
+      },
       async showTextDocument(document,opts={}){const e={document,viewColumn:opts.viewColumn===-2?2:opts.viewColumn||2};this.activeTextEditor=e;this.visibleTextEditors=[e];return e;}
     },
     languages:{registerCodeLensProvider(_,provider){vscode.provider=provider;return disposable();}},
@@ -545,4 +588,230 @@ test('completed official submit and resume refresh visible progress without fail
   assert.equal(f.errors.length,0);
   assert.match(f.logs.join('\n'),/OFFICIAL LEETCODE SUBMISSION[^]*Verdict: Accepted/);
 });
+
+test('G1: lc.openGUI manages a single reusable WebviewPanel, cleans up listeners on close/reopen, and preserves script-free description panel', async t=>{
+  let dailyCalls=0;
+  let catalogCalls=0;
+  let accountCalls=0;
+  const f=await fixture(t,async(_p,o)=>{
+    const {query}=o.body;
+    if(query.includes('userStatus')){accountCalls++;return {data:{userStatus:{isSignedIn:true,username:'alice'}}};}
+    if(query.includes('activeDailyCodingChallengeQuestion')){
+      dailyCalls++;
+      return {data:{activeDailyCodingChallengeQuestion:{date:'2026-10-27',link:'/problems/two-sum/',question:q}}};
+    }
+    if(query.includes('problemsetQuestionList')){
+      catalogCalls++;
+      return {data:{problemsetQuestionList:{total:1,questions:[q]}}};
+    }
+    throw new Error('unexpected query');
+  },{initialSecrets:[['leetcode.session.v1',JSON.stringify({session:'super-secret-session-cookie',csrf:'super-secret-csrf-token'})]]});
+
+  // Activation does not open GUI or perform network calls.
+  assert.equal(f.panels.length,0);
+  assert.equal(dailyCalls,0);
+  assert.equal(catalogCalls,0);
+
+  // First lc.openGUI creates one dashboard panel and loads anonymous discovery without verifying account.
+  const panel1=await f.handlers.get('lc.openGUI')();
+  await f.controller.discovery.refreshAll();
+  await f.controller.dashboard.refresh();
+
+  assert.equal(f.panels.length,1);
+  assert.equal(panel1.viewType,'lc.dashboard');
+  assert.equal(panel1.htmlWriteCount,1);
+  assert.equal(panel1.options.enableScripts,true);
+  assert.equal(panel1.options.enableCommandUris,false);
+  assert.equal(panel1.options.retainContextWhenHidden,true);
+  assert.equal(panel1.options.localResourceRoots.length,1);
+  assert.ok(panel1.options.localResourceRoots[0].fsPath.endsWith(path.join('media')));
+  assert.equal(panel1.messageListenerCount,1);
+  assert.equal(accountCalls,0);
+  assert.equal(f.controller.discovery.account.kind,'unverified');
+
+  // Webview 'ready' handshake posts current state without reassigning webview.html (preventing reload loop).
+  const postsBeforeReady=panel1.postedMessages.length;
+  const [readyRes]=await panel1.emitMessage({action:'ready'});
+  assert.deepEqual(readyRes,{ok:true,action:'ready'});
+  assert.equal(panel1.htmlWriteCount,1);
+  assert.equal(panel1.postedMessages.length,postsBeforeReady+1);
+  assert.equal(panel1.postedMessages.at(-1).type,'state');
+
+  // Calling lc.openGUI again reveals the existing panel without creating a duplicate, adding listeners, or replacing HTML.
+  const callsBeforeReopen=dailyCalls+catalogCalls;
+  const panel1Again=await f.handlers.get('lc.openGUI')();
+  assert.equal(panel1Again,panel1);
+  assert.equal(f.panels.length,1);
+  assert.equal(panel1.revealCount,1);
+  assert.equal(panel1.messageListenerCount,1);
+  assert.equal(panel1.htmlWriteCount,1);
+  assert.equal(dailyCalls+catalogCalls,callsBeforeReopen);
+
+  // Navigate to 'local' destination and verify state update via postMessage without replacing HTML.
+  const navRes=await panel1.emitMessage({action:'navigate',destination:'local'});
+  assert.equal(navRes.length,1);
+  assert.deepEqual(navRes[0],{ok:true,action:'navigate',destination:'local'});
+  assert.equal(f.controller.dashboard.lastState.destination,'local');
+  assert.equal(panel1.postedMessages.at(-1).state.destination,'local');
+  assert.equal(panel1.htmlWriteCount,1);
+
+  // Closing the panel disposes its listeners and resets HTML initialization marker; reopening initializes HTML once on the new panel.
+  panel1.dispose();
+  assert.equal(panel1.messageListenerCount,0);
+  assert.equal(f.controller.dashboard.isOpen,false);
+
+  const panel2=await f.handlers.get('lc.openGUI')();
+  assert.notEqual(panel2,panel1);
+  assert.equal(f.panels.length,2);
+  assert.equal(panel2.messageListenerCount,1);
+  assert.equal(panel2.htmlWriteCount,1);
+  assert.equal(f.controller.dashboard.lastState.destination,'local');
+  await panel2.emitMessage({action:'ready'});
+  await panel2.emitMessage({action:'navigate',destination:'account'});
+  assert.equal(panel2.htmlWriteCount,1);
+  assert.equal(panel2.postedMessages.at(-1).state.destination,'account');
+
+  // Opening problem description still creates/uses the separate script-free lc.problem panel.
+  await f.handlers.get('lc.description')();
+  const descPanel=f.panels.find(p=>p.viewType==='lc.problem');
+  assert.ok(descPanel);
+  assert.equal(descPanel.options.enableScripts,false);
+  assert.equal(descPanel.options.enableCommandUris,false);
+  assert.deepEqual(descPanel.options.localResourceRoots,[]);
+});
+
+test('G1: dashboard enforces strict CSP, loads bundled assets, escapes untrusted text, and never exposes secrets', async t=>{
+  const xssTitle='<script>alert("xss")</script></script><img src=x onerror=alert(1)>';
+  const f=await fixture(t,async(_p,o)=>{
+    const {query}=o.body;
+    if(query.includes('activeDailyCodingChallengeQuestion')){
+      return {data:{activeDailyCodingChallengeQuestion:{date:'2026-10-27',link:'/problems/two-sum/',question:{...q,title:xssTitle}}}};
+    }
+    if(query.includes('problemsetQuestionList')){
+      return {data:{problemsetQuestionList:{total:1,questions:[{...q,title:xssTitle}]}}};
+    }
+    throw new Error('unexpected query');
+  },{initialSecrets:[['leetcode.session.v1',JSON.stringify({session:'secret-cookie-value-999',csrf:'secret-csrf-value-888'})]]});
+
+  const mediaDir=path.resolve(__dirname,'..','media');
+  await fs.access(path.join(mediaDir,'dashboard.css'));
+  await fs.access(path.join(mediaDir,'dashboard.js'));
+
+  await f.controller.discovery.refreshAll();
+  const panel=await f.handlers.get('lc.openGUI')();
+  const html=panel.webview.html;
+
+  // Strict CSP assertions
+  assert.match(html,/default-src 'none'/);
+  assert.match(html,/style-src vscode-webview-resource:\/\/test-csp/);
+  assert.match(html,/script-src 'nonce-[a-f0-9]{32}'/);
+  assert.match(html,/img-src 'none'/);
+  assert.match(html,/connect-src 'none'/);
+  assert.match(html,/form-action 'none'/);
+  assert.match(html,/base-uri 'none'/);
+  assert.match(html,/vscode-webview-resource:\/\/test-csp\/dashboard\.css/);
+  assert.match(html,/vscode-webview-resource:\/\/test-csp\/dashboard\.js/);
+
+  // Untrusted problem titles are escaped in both HTML body and JSON bootstrap script.
+  assert.ok(!html.includes('<script>alert("xss")</script>'));
+  assert.ok(!html.includes('<img src=x'));
+  assert.ok(html.includes('&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;'));
+
+  // Secrets never appear in webview HTML or posted state messages.
+  const serializedMessages=JSON.stringify(panel.postedMessages);
+  assert.ok(!html.includes('secret-cookie-value-999'));
+  assert.ok(!html.includes('secret-csrf-value-888'));
+  assert.ok(!serializedMessages.includes('secret-cookie-value-999'));
+  assert.ok(!serializedMessages.includes('secret-csrf-value-888'));
+  assert.equal('auth' in f.controller.dashboard.lastState.account,false);
+
+  // Honest G1 labels for G2-G4 actions are present.
+  assert.match(html,/Open \(Planned in G2\)/);
+  assert.match(html,/Run Examples \(G3\)/);
+  assert.match(html,/Advanced: Import Session \(G4\)/);
+});
+
+test('G1: dashboard message bridge validates allowlisted actions, surfaces loading/error/retry states, and rejects malformed or unknown payloads', async t=>{
+  let failNetwork=true;
+  const f=await fixture(t,async(_p,o)=>{
+    if(failNetwork)throw new LcError('NETWORK','Cannot reach LeetCode right now.');
+    const {query}=o.body;
+    if(query.includes('activeDailyCodingChallengeQuestion')){
+      return {data:{activeDailyCodingChallengeQuestion:{date:'2026-10-27',link:'/problems/two-sum/',question:q}}};
+    }
+    return {data:{problemsetQuestionList:{total:1,questions:[q]}}};
+  });
+
+  await f.controller.discovery.refreshAll();
+  const panel=await f.handlers.get('lc.openGUI')();
+  await f.controller.dashboard.refresh();
+
+  // Error states are surfaced explicitly in initial HTML and posted state, with single HTML initialization.
+  assert.equal(panel.htmlWriteCount,1);
+  assert.equal(f.controller.dashboard.lastState.daily.status,'error');
+  assert.equal(f.controller.dashboard.lastState.catalog.status,'error');
+  assert.equal(panel.postedMessages.at(-1).state.daily.error,'Cannot reach LeetCode right now.');
+  assert.equal(panel.postedMessages.at(-1).state.catalog.error,'Cannot reach LeetCode right now.');
+  assert.match(panel.webview.html,/Cannot reach LeetCode right now\./);
+  assert.match(panel.webview.html,/Retry Daily Challenge/);
+  assert.match(panel.webview.html,/Retry Problem List/);
+
+  // Recovery via message bridge refresh action updates state via postMessage without replacing webview.html.
+  failNetwork=false;
+  const [refreshRes]=await panel.emitMessage({action:'refresh',target:'all'});
+  assert.deepEqual(refreshRes,{ok:true,action:'refresh',target:'all'});
+  assert.equal(panel.htmlWriteCount,1);
+  assert.equal(f.controller.dashboard.lastState.daily.status,'ready');
+  assert.equal(f.controller.dashboard.lastState.catalog.status,'ready');
+  assert.equal(panel.postedMessages.at(-1).state.daily.status,'ready');
+  assert.equal(panel.postedMessages.at(-1).state.catalog.status,'ready');
+  assert.equal(f.controller.dashboard.lastState.localProblems[0].availability,'Available locally');
+
+  // Navigate across all three destinations ('explore', 'local', 'account').
+  for(const dest of ['account','local','explore']){
+    const [res]=await panel.emitMessage({action:'navigate',destination:dest});
+    assert.equal(res.ok,true);
+    assert.equal(f.controller.dashboard.lastState.destination,dest);
+  }
+
+  // Valid-shaped G2-G4 actions return honest UNIMPLEMENTED status and set a dismissible notice.
+  const [unimpl]=await panel.emitMessage({action:'openProblem',titleSlug:'two-sum'});
+  assert.equal(unimpl.ok,false);
+  assert.equal(unimpl.code,'UNIMPLEMENTED');
+  assert.match(f.controller.dashboard.lastState.notice.message,/not yet implemented in G1/);
+
+  const [dismissRes]=await panel.emitMessage({action:'dismissNotice'});
+  assert.equal(dismissRes.ok,true);
+  assert.equal(f.controller.dashboard.lastState.notice,null);
+
+  // Unknown or malformed messages are rejected with INVALID_MESSAGE.
+  const invalidPayloads=[
+    null,
+    undefined,
+    'navigate',
+    123,
+    ['navigate'],
+    {},
+    {action:'unknownAction'},
+    {action:'executeCommand',command:'lc.submit'},
+    {action:'navigate',destination:'settings'},
+    {action:'navigate',destination:'explore',url:'https://evil.example'},
+    {action:' navigate',destination:'explore',path:'../secret'},
+    {action:'refresh',target:'invalidTarget'},
+    {action:'openProblem',titleSlug:'../../etc/passwd'},
+    {action:'problemAction',kind:'arbitraryShell'},
+    {action:'accountAction',kind:'stealCookies'},
+    {action:'setFilters',filters:{query:'ok',session:'leaked'}}
+  ];
+
+  const rejectedBefore=f.controller.dashboard.rejectedCount;
+  for(const bad of invalidPayloads){
+    assert.equal(validateDashboardMessage(bad).code,'INVALID_MESSAGE');
+    const [res]=await panel.emitMessage(bad);
+    assert.equal(res.ok,false);
+    assert.equal(res.code,'INVALID_MESSAGE');
+  }
+  assert.equal(f.controller.dashboard.rejectedCount,rejectedBefore+invalidPayloads.length);
+});
+
 

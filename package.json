@@ -36,6 +36,7 @@
       ]
     },
     "commands": [
+      { "command": "lc.openGUI", "title": "LeetCode: OpenGUI" },
       { "command": "lc.connect", "title": "LeetCode: Connect Account" },
       { "command": "lc.openSignIn", "title": "LeetCode: Open LeetCode Sign-in" },
       { "command": "lc.importSession", "title": "LeetCode: Advanced: Import Session" },
