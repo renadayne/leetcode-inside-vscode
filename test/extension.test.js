@@ -15,7 +15,12 @@ function fakeVSCode() {
   const handlers=new Map();
   const errors=[], logs=[], infos=[], inputs=[], picks=[], panels=[], treeProviders=new Map();
   const documents=[];
+  const closedUris=new Set();
   const activeEditorListeners=[];
+  const closeDocument=docOrUri=>{
+    const key=(docOrUri?.uri||docOrUri).toString();
+    closedUris.add(key);
+  };
   const Uri={file:file=>({scheme:'file',fsPath:file,toString:()=>`file://${file}`}),parse:value=>({toString:()=>value})};
   const vscode={Uri,StatusBarAlignment:{Left:1},ViewColumn:{One:1,Beside:-2},ProgressLocation:{Notification:15},
     TreeItemCollapsibleState:{None:0,Collapsed:1,Expanded:2},
@@ -33,9 +38,21 @@ function fakeVSCode() {
       async executeCommand(id,...args){if(handlers.has(id))return handlers.get(id)(...args);}
     },
     workspace:{textDocuments:documents,async openTextDocument(uri){
-      let doc=documents.find(d=>d.uri.toString()===uri.toString());
-      if(!doc){doc={uri,version:1,isDirty:false,isClosed:false,text:await fs.readFile(uri.fsPath,'utf8'),getText(){return this.text;}};documents.push(doc);}
-      else{doc.isClosed=false;}
+      const key=uri.toString();
+      closedUris.delete(key);
+      let doc=documents.find(d=>d.uri.toString()===key);
+      if(!doc){
+        const initialText=await fs.readFile(uri.fsPath,'utf8');
+        doc={
+          get uri(){return uri;},
+          get isClosed(){return closedUris.has(key);},
+          version:1,
+          isDirty:false,
+          text:initialText,
+          getText(){return this.text;}
+        };
+        documents.push(doc);
+      }
       return doc;
     }},
     window:{activeTextEditor:undefined,visibleTextEditors:[],
@@ -109,7 +126,7 @@ function fakeVSCode() {
     languages:{registerCodeLensProvider(_,provider){vscode.provider=provider;return disposable();}},
     env:{async openExternal(){return true;}}
   };
-  return {vscode,handlers,errors,logs,infos,inputs,picks,panels,treeProviders};
+  return {vscode,handlers,errors,logs,infos,inputs,picks,panels,treeProviders,closeDocument};
 }
 async function fixture(t,transport,options={}) {
   const dir=await fs.mkdtemp(path.join(os.tmpdir(),'lc-extension-'));
@@ -1142,9 +1159,14 @@ test('G3: dashboard Current Problem actions target the selected solution when we
   assert.equal(f.controller.dashboard.lastState.lastResult.problemNumber,'2');
   assert.equal(f.controller.dashboard.lastState.lastResult.problemTitle,'Add Two Numbers');
 
-  // Closing the selected solution editor (doc2.isClosed = true) while doc1 is still open in textDocuments
+  // Verify VS Code TextDocument readonly getter contract: direct assignment to isClosed/uri throws TypeError.
+  assert.throws(()=>{doc2.isClosed=false;},TypeError);
+  assert.throws(()=>{doc2.uri=null;},TypeError);
+
+  // Closing the selected solution editor while doc1 is still open in textDocuments
   // must block Run/Submit with SELECTION rather than running doc1.
-  doc2.isClosed=true;
+  f.closeDocument(doc2);
+  assert.equal(doc2.isClosed,true);
   f.vscode.window.activeTextEditor=undefined;
   await f.controller.dashboard.refresh();
   assert.equal(f.controller.dashboard.lastState.currentProblem.editorOpen,false);
@@ -1155,12 +1177,24 @@ test('G3: dashboard Current Problem actions target the selected solution when we
   assert.equal(closedRunRes.code,'SELECTION');
   assert.match(f.controller.dashboard.lastState.notice.message,/closed.*Open Code/i);
   assert.equal(requests.length,0);
+  assert.equal(f.errors.length,1);
+  f.errors.length=0;
 
-  // Clicking Open Code in dashboard reopens the closed solution editor and restores Run/Submit capability.
+  // Clicking Open Code in dashboard reopens the closed solution editor via openTextDocument without mutating readonly properties.
   const [reopenRes]=await panel.emitMessage({action:'problemAction',kind:'openCode'});
   assert.deepEqual(reopenRes,{ok:true,action:'problemAction',kind:'openCode'});
   assert.equal(doc2.isClosed,false);
   assert.equal(f.controller.dashboard.lastState.currentProblem.editorOpen,true);
+  assert.equal(f.errors.length,0);
+
+  // Closing again and clicking Open on the problem row ('openProblem') also reopens the document cleanly through openTextDocument.
+  f.closeDocument(doc2);
+  assert.equal(doc2.isClosed,true);
+  const [openProblemReopenRes]=await panel.emitMessage({action:'openProblem',titleSlug:'add-two-numbers'});
+  assert.deepEqual(openProblemReopenRes,{ok:true,action:'openProblem',titleSlug:'add-two-numbers'});
+  assert.equal(doc2.isClosed,false);
+  assert.equal(f.controller.dashboard.lastState.currentProblem.editorOpen,true);
+  assert.equal(f.errors.length,0);
   assert.equal(panel.htmlWriteCount,1);
 });
 

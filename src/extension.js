@@ -294,7 +294,6 @@ async function createController(vscode, context, dependencies = {}) {
     showDescription(q);
     const fileUri = vscode.Uri.file(file);
     const doc = await vscode.workspace.openTextDocument(fileUri);
-    if (doc && typeof doc === 'object') doc.isClosed = false;
     selectedUri = doc?.uri || fileUri;
     const solutionColumn = visible?.viewColumn && visible.viewColumn !== panel.viewColumn ? visible.viewColumn : vscode.ViewColumn.Beside;
     await vscode.window.showTextDocument(doc, { viewColumn: solutionColumn, preview: false });
@@ -624,7 +623,6 @@ async function createController(vscode, context, dependencies = {}) {
     const q = await selectedProblem();
     const file = await store.custom(q);
     const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
-    if (doc && typeof doc === 'object') doc.isClosed = false;
     await vscode.window.showTextDocument(doc, { preview: false });
     await vscode.window.showInformationMessage('Use LeetCode input format: one argument per line; repeat arguments for additional cases. Return to the solution editor and choose Run Custom Input.');
   }
