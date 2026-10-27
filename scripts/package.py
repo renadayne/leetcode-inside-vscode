@@ -11,8 +11,8 @@ out.mkdir(exist_ok=True)
 stem = f"{manifest['name']}-{manifest['version']}"
 runtime = [
     'package.json', 'README.md', 'LICENSE', 'CHANGELOG.md', 'SECURITY.md', 'VERIFICATION.md',
-    'media/leetcode.svg',
-    'src/api.js', 'src/discovery.js', 'src/explorer.js', 'src/extension.js',
+    'media/leetcode.svg', 'media/dashboard.css', 'media/dashboard.js',
+    'src/api.js', 'src/dashboard.js', 'src/discovery.js', 'src/explorer.js', 'src/extension.js',
     'src/jobs.js', 'src/render.js', 'src/store.js'
 ]
 source_files = runtime + [
@@ -43,8 +43,8 @@ vsix_manifest = f'''<?xml version="1.0" encoding="utf-8"?>
 content_types = '''<?xml version="1.0" encoding="utf-8"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
 <Default Extension="json" ContentType="application/json"/><Default Extension="js" ContentType="application/javascript"/>
-<Default Extension="md" ContentType="text/markdown"/><Default Extension="svg" ContentType="image/svg+xml"/>
-<Default Extension="vsixmanifest" ContentType="text/xml"/>
+<Default Extension="css" ContentType="text/css"/><Default Extension="md" ContentType="text/markdown"/>
+<Default Extension="svg" ContentType="image/svg+xml"/><Default Extension="vsixmanifest" ContentType="text/xml"/>
 <Override PartName="/extension/LICENSE" ContentType="text/plain"/></Types>'''
 with ZipFile(out / f'{stem}.vsix', 'w', ZIP_DEFLATED) as z:
     z.writestr('extension.vsixmanifest', vsix_manifest)

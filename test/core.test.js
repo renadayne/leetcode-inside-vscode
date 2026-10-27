@@ -205,12 +205,12 @@ test('test execution success is never mistaken for Accepted, and error details a
   assert.match(formatResult({job:{...job,kind:'submit'},result:{status_code:20,full_compile_error:'unknown identifier'}}), /Compilation Error[^]*unknown identifier/);
   assert.match(formatResult({job:{...job,kind:'submit'},result:{status_code:14}}), /Time Limit Exceeded/);
 });
-test('Node packager builds verified 0.2.0 VSIX and source archives with forward-slash paths and strict allowlist', async t => {
+test('Node packager builds verified 0.3.0 VSIX and source archives with forward-slash paths and strict allowlist', async t => {
   const {dir} = await setup(t);
   const rootDir = path.resolve(__dirname, '..');
   const out = buildPackages(rootDir, dir);
-  assert.equal(path.basename(out.vsixPath), 'leetcode-inside-vscode-0.2.0.vsix');
-  assert.equal(path.basename(out.sourceZipPath), 'leetcode-inside-vscode-0.2.0-source.zip');
+  assert.equal(path.basename(out.vsixPath), 'leetcode-inside-vscode-0.3.0.vsix');
+  assert.equal(path.basename(out.sourceZipPath), 'leetcode-inside-vscode-0.3.0-source.zip');
 
   const vsixItems = readZipEntries(await fs.readFile(out.vsixPath));
   const sourceItems = readZipEntries(await fs.readFile(out.sourceZipPath));
@@ -222,12 +222,16 @@ test('Node packager builds verified 0.2.0 VSIX and source archives with forward-
   assert.ok(vsixNames.has('extension.vsixmanifest'));
   assert.ok(vsixNames.has('[Content_Types].xml'));
   assert.ok(vsixNames.has('extension/media/leetcode.svg'));
+  assert.ok(vsixNames.has('extension/media/dashboard.css'));
+  assert.ok(vsixNames.has('extension/media/dashboard.js'));
+  assert.ok(vsixNames.has('extension/src/dashboard.js'));
   assert.ok(vsixNames.has('extension/src/discovery.js'));
   assert.ok(vsixNames.has('extension/src/explorer.js'));
 
   const vsixManifest = vsixItems.find(e => e.name === 'extension.vsixmanifest').data.toString('utf8');
-  assert.match(vsixManifest, /Version="0\.2\.0"/);
+  assert.match(vsixManifest, /Version="0\.3\.0"/);
   const contentTypes = vsixItems.find(e => e.name === '[Content_Types].xml').data.toString('utf8');
+  assert.match(contentTypes, /Extension="css"\s+ContentType="text\/css"/);
   assert.match(contentTypes, /Extension="svg"\s+ContentType="image\/svg\+xml"/);
 
   for (const item of [...vsixItems, ...sourceItems]) {

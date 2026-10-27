@@ -6,7 +6,7 @@ const { RUNTIME_ALLOWLIST, SOURCE_ALLOWLIST } = require('./package');
 
 const root = path.resolve(__dirname, '..');
 
-for (const folder of ['src', 'test', 'scripts']) {
+for (const folder of ['src', 'test', 'scripts', 'media']) {
   const dir = path.join(root, folder);
   for (const name of fs.readdirSync(dir).filter(n => n.endsWith('.js'))) {
     execFileSync(process.execPath, ['--check', path.join(dir, name)], { stdio: 'inherit' });
@@ -22,6 +22,24 @@ for (const { command } of manifest.contributes.commands || []) {
   if (!src.includes(`command('${command}'`)) {
     throw new Error(`Missing command registration in src/extension.js: ${command}`);
   }
+}
+if (!commandIds.has('lc.openGUI')) {
+  throw new Error('Missing required OpenGUI command declaration: lc.openGUI');
+}
+
+for (const assetRel of ['media/dashboard.css', 'media/dashboard.js', 'src/dashboard.js']) {
+  const assetPath = path.join(root, assetRel);
+  if (!fs.existsSync(assetPath) || fs.statSync(assetPath).size === 0) {
+    throw new Error(`Missing or empty dashboard asset: ${assetRel}`);
+  }
+}
+
+const paletteMenu = manifest.contributes?.menus?.commandPalette;
+if (!Array.isArray(paletteMenu) || paletteMenu.length === 0) {
+  throw new Error('Missing contributes.menus.commandPalette entries in package.json');
+}
+if (paletteMenu.some(item => item.command === 'lc.openGUI' && item.when === 'false')) {
+  throw new Error('lc.openGUI must remain visible in the Command Palette');
 }
 
 const containerIds = new Set();

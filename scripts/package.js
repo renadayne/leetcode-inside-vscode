@@ -162,7 +162,10 @@ const RUNTIME_ALLOWLIST = [
   'SECURITY.md',
   'VERIFICATION.md',
   'media/leetcode.svg',
+  'media/dashboard.css',
+  'media/dashboard.js',
   'src/api.js',
+  'src/dashboard.js',
   'src/discovery.js',
   'src/explorer.js',
   'src/extension.js',
@@ -211,8 +214,8 @@ function buildVsixManifest(manifest) {
 const CONTENT_TYPES_XML = `<?xml version="1.0" encoding="utf-8"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
 <Default Extension="json" ContentType="application/json"/><Default Extension="js" ContentType="application/javascript"/>
-<Default Extension="md" ContentType="text/markdown"/><Default Extension="svg" ContentType="image/svg+xml"/>
-<Default Extension="vsixmanifest" ContentType="text/xml"/>
+<Default Extension="css" ContentType="text/css"/><Default Extension="md" ContentType="text/markdown"/>
+<Default Extension="svg" ContentType="image/svg+xml"/><Default Extension="vsixmanifest" ContentType="text/xml"/>
 <Override PartName="/extension/LICENSE" ContentType="text/plain"/></Types>`;
 
 function buildPackages(rootDir = ROOT, customOutDir) {

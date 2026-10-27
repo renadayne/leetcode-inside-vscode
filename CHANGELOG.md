@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0 — 2026-10-27
+
+- Added **LeetCode: OpenGUI** (`lc.openGUI`), a unified click-driven editor-tab dashboard (`src/dashboard.js`, `media/dashboard.css`, `media/dashboard.js`) backed by VS Code's built-in `WebviewPanel`, bundled theme-aware local assets, one-time HTML initialization per panel with non-destructive `postMessage` state updates, and shared discovery/account state with the Activity Bar sidebar.
+- Added **Explore** and **My Problems** dashboard workflows: dated Daily Challenge with explicit `(stale)` fallback, title/number search on `Enter` or **Search**, difficulty/multi-topic/verified-progress filters with removable filter chips and reset, 50-item pagination, visible `Unsupported ID` and `Premium` indicators, and offline local solution reopening.
+- Added the **Current Problem** action bar with explicit selected solution/file retention across webview or custom-input focus (`selectedUri`), synchronous unsaved C++ and custom-input buffer capture at action start, closed/missing target rejection (`SELECTION`) without running another open file, **Open Code**, **View Description**, **Run Examples**, **Edit Custom Input**, **Run Custom Input**, **Submit**, **Results**, **Retrieve Pending Result**, **Clear Pending Operation**, **Open Solutions Folder**, busy duplicate request blocking, and in-GUI result/pending summaries.
+- Added **Account** dashboard controls (**Open LeetCode Sign-in**, **Check Saved Session**, **Disconnect Account**, and a separate **Advanced: Import Session** section launching native masked input dialogs) synchronized with the sidebar and problem description panel, and hid 15 internal button-only/tree/filter/pagination commands from the Command Palette via `contributes.menus.commandPalette` (`"when": "false"`) while preserving all 29 command registrations and direct shortcuts.
+- Updated `scripts/package.js`, `scripts/package.py`, and `scripts/check.js` for the `0.3.0` dashboard assets and CSS VSIX content type, expanding automated test coverage to 47 tests (46 passing, 1 Windows symlink `EPERM` skip).
+
 ## 0.2.0 — 2026-10-27
 
 - Added a native **LeetCode** Activity Bar container and sidebar (`TreeDataProvider`) with **Account**, **Daily Challenge**, **Browse Problems**, and **Local Problems** sections for click-driven problem discovery without requiring command-palette workflows.

@@ -2,7 +2,7 @@
   "name": "leetcode-inside-vscode",
   "displayName": "LeetCode Inside VS Code",
   "description": "Personal C++ practice using LeetCode's remote runner and judge.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "personal-tools",
   "license": "MIT",
   "engines": { "vscode": "^1.93.0" },
