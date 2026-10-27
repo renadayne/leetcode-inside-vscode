@@ -10,6 +10,7 @@ const { LeetCodeClient, LcError, requestJson, credentials } = require('../src/ap
 const { Store } = require('../src/store');
 const { Jobs } = require('../src/jobs');
 const { sanitize, description, formatResult } = require('../src/render');
+const { buildPackages, readZipEntries, RUNTIME_ALLOWLIST, SOURCE_ALLOWLIST } = require('../scripts/package');
 
 const q = { questionId:'1', questionFrontendId:'1', title:'Two Sum', titleSlug:'two-sum', difficulty:'Easy', content:'<p>Find two values.</p>', starter:'class Solution { public: vector<int> twoSum(vector<int>& nums, int target) {} };', exampleTestcases:'[2,7,11,15]\n9', enableRunCode:true };
 const auth = credentials('fake-session-value', 'fake-csrf-token');
@@ -94,15 +95,32 @@ test('persistent solutions are never overwritten, and survive a new Store instan
   await assert.rejects(reloaded.registered(path.join(store.root,'other.cpp')), {code:'SELECTION'});
   await assert.rejects(reloaded.registered(path.join(path.dirname(store.root),'1.two-sum.cpp')), {code:'SELECTION'});
 });
-test('linked files and path traversal cannot be selected as solutions or inputs', async t => {
+test('path traversal and outside files cannot be cached or selected as solutions', async t => {
+  const {dir,store} = await setup(t);
+  const unrelated = path.join(dir, 'private.cpp');
+  await fs.writeFile(unrelated, 'confidential');
+  await assert.rejects(store.cache({...q,titleSlug:'../../private'}), {code:'PROTOCOL'});
+  await assert.rejects(store.cache({...q,questionFrontendId:'../1'}), {code:'PATH'});
+  await assert.rejects(store.safe(unrelated, true), {code:'PATH'});
+  await assert.rejects(store.registered(unrelated), {code:'SELECTION'});
+  assert.equal(await fs.readFile(unrelated,'utf8'),'confidential');
+});
+test('linked files cannot be selected as solutions or inputs', async t => {
   const {dir,store} = await setup(t);
   const file = await store.cache(q);
   await fs.unlink(file);
   const unrelated = path.join(dir, 'private.cpp');
   await fs.writeFile(unrelated, 'confidential');
-  await fs.symlink(unrelated, file);
+  try {
+    await fs.symlink(unrelated, file);
+  } catch (e) {
+    if (e.code === 'EPERM' || e.code === 'ENOSYS') {
+      t.skip(`Symbolic link creation not permitted in this environment (${e.code}).`);
+      return;
+    }
+    throw e;
+  }
   await assert.rejects(store.registered(file), {code:'PATH'});
-  await assert.rejects(store.cache({...q,titleSlug:'../../private'}), {code:'PROTOCOL'});
   const input = path.join(store.root,'1.two-sum.cpp.input.txt');
   await fs.symlink(unrelated,input);
   await assert.rejects(store.custom(q), {code:'PATH'});
@@ -186,4 +204,35 @@ test('test execution success is never mistaken for Accepted, and error details a
   assert.match(formatResult({job,result:{status_code:10}}), /comparison unavailable/);
   assert.match(formatResult({job:{...job,kind:'submit'},result:{status_code:20,full_compile_error:'unknown identifier'}}), /Compilation Error[^]*unknown identifier/);
   assert.match(formatResult({job:{...job,kind:'submit'},result:{status_code:14}}), /Time Limit Exceeded/);
+});
+test('Node packager builds verified 0.2.0 VSIX and source archives with forward-slash paths and strict allowlist', async t => {
+  const {dir} = await setup(t);
+  const rootDir = path.resolve(__dirname, '..');
+  const out = buildPackages(rootDir, dir);
+  assert.equal(path.basename(out.vsixPath), 'leetcode-inside-vscode-0.2.0.vsix');
+  assert.equal(path.basename(out.sourceZipPath), 'leetcode-inside-vscode-0.2.0-source.zip');
+
+  const vsixItems = readZipEntries(await fs.readFile(out.vsixPath));
+  const sourceItems = readZipEntries(await fs.readFile(out.sourceZipPath));
+
+  assert.equal(vsixItems.length, RUNTIME_ALLOWLIST.length + 2);
+  assert.equal(sourceItems.length, SOURCE_ALLOWLIST.length);
+
+  const vsixNames = new Set(vsixItems.map(e => e.name));
+  assert.ok(vsixNames.has('extension.vsixmanifest'));
+  assert.ok(vsixNames.has('[Content_Types].xml'));
+  assert.ok(vsixNames.has('extension/media/leetcode.svg'));
+  assert.ok(vsixNames.has('extension/src/discovery.js'));
+  assert.ok(vsixNames.has('extension/src/explorer.js'));
+
+  const vsixManifest = vsixItems.find(e => e.name === 'extension.vsixmanifest').data.toString('utf8');
+  assert.match(vsixManifest, /Version="0\.2\.0"/);
+  const contentTypes = vsixItems.find(e => e.name === '[Content_Types].xml').data.toString('utf8');
+  assert.match(contentTypes, /Extension="svg"\s+ContentType="image\/svg\+xml"/);
+
+  for (const item of [...vsixItems, ...sourceItems]) {
+    assert.ok(!item.name.includes('\\'));
+    assert.ok(!item.name.includes('.git/'));
+    assert.ok(!item.name.includes('dist/'));
+  }
 });

@@ -5,12 +5,21 @@ from zipfile import ZipFile, ZIP_DEFLATED
 from xml.sax.saxutils import escape
 
 root = Path(__file__).resolve().parent.parent
-manifest = json.loads((root / 'package.json').read_text())
+manifest = json.loads((root / 'package.json').read_text(encoding='utf-8'))
 out = root / 'dist'
 out.mkdir(exist_ok=True)
 stem = f"{manifest['name']}-{manifest['version']}"
-runtime = ['package.json', 'README.md', 'LICENSE', 'CHANGELOG.md', 'SECURITY.md', 'VERIFICATION.md']
-runtime += [str(p.relative_to(root)) for p in sorted((root / 'src').glob('*.js'))]
+runtime = [
+    'package.json', 'README.md', 'LICENSE', 'CHANGELOG.md', 'SECURITY.md', 'VERIFICATION.md',
+    'media/leetcode.svg',
+    'src/api.js', 'src/discovery.js', 'src/explorer.js', 'src/extension.js',
+    'src/jobs.js', 'src/render.js', 'src/store.js'
+]
+source_files = runtime + [
+    '.gitignore', 'IMPLEMENTATION_PLAN.md', '.vscode/launch.json',
+    'scripts/check.js', 'scripts/package.js', 'scripts/package.py', 'scripts/smoke-live.js',
+    'test/core.test.js', 'test/discovery-api.test.js', 'test/extension.test.js'
+]
 vsix_manifest = f'''<?xml version="1.0" encoding="utf-8"?>
 <PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011" xmlns:d="http://schemas.microsoft.com/developer/vsx-schema-design/2011">
   <Metadata><Identity Language="en-US" Id="{escape(manifest['name'])}" Version="{manifest['version']}" Publisher="{manifest['publisher']}"/>
@@ -34,17 +43,16 @@ vsix_manifest = f'''<?xml version="1.0" encoding="utf-8"?>
 content_types = '''<?xml version="1.0" encoding="utf-8"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
 <Default Extension="json" ContentType="application/json"/><Default Extension="js" ContentType="application/javascript"/>
-<Default Extension="md" ContentType="text/markdown"/><Default Extension="vsixmanifest" ContentType="text/xml"/>
+<Default Extension="md" ContentType="text/markdown"/><Default Extension="svg" ContentType="image/svg+xml"/>
+<Default Extension="vsixmanifest" ContentType="text/xml"/>
 <Override PartName="/extension/LICENSE" ContentType="text/plain"/></Types>'''
 with ZipFile(out / f'{stem}.vsix', 'w', ZIP_DEFLATED) as z:
     z.writestr('extension.vsixmanifest', vsix_manifest)
     z.writestr('[Content_Types].xml', content_types)
     for name in runtime:
-        z.write(root / name, 'extension/' + name)
+        z.write(root / name, 'extension/' + name.replace('\\', '/'))
 with ZipFile(out / f'{stem}-source.zip', 'w', ZIP_DEFLATED) as z:
-    for p in sorted(root.rglob('*')):
-        rel = p.relative_to(root)
-        if p.is_file() and not any(part in {'dist', 'node_modules', '.git', '__pycache__'} for part in rel.parts):
-            z.write(p, stem + '/' + str(rel))
+    for name in source_files:
+        z.write(root / name, stem + '/' + name.replace('\\', '/'))
 print(out / f'{stem}.vsix')
 print(out / f'{stem}-source.zip')

@@ -1,15 +1,24 @@
 # Security and trust model
 
-The runtime has no third-party dependencies and no local execution path for C++. It uses Node HTTPS with TLS verification, a fixed leetcode.com origin, a path allowlist, no redirects, bounded responses, and request timeouts. It sends no background analytics or startup network requests. It does not read the clipboard, scan a workspace, or run shell commands.
+The runtime has no third-party dependencies and no local execution path for C++. It uses Node HTTPS with TLS verification, a fixed `https://leetcode.com` origin, a strict path allowlist, no redirects, bounded responses, and request timeouts. It sends no background analytics and makes no network requests on startup activation. It does not read the clipboard, scan a workspace, run shell commands, install browser companions, automate browsers, scrape browser cookie databases, or run a local server.
 
-An explicit remote command accepts only a solution registered in the extension's dedicated folder. It checks the regular file and rejects symlinks/outside paths before authenticating and sending the captured text. It never falls back to the last active file for a submission. Workspace configuration cannot redirect the solution folder or API origin.
+## Managed-device authentication boundary
 
-Credentials are session cookies, never passwords. They are imported through masked fields and stored only in VS Code SecretStorage, never in configuration or solution metadata. Only known, controlled error messages are surfaced; arbitrary transport/GraphQL exception bodies are not logged. The account username, submitted source filename/hash/version, and remote judge output are not treated as secrets and appear in results/recovery metadata. LeetCode necessarily receives source explicitly sent for execution.
+No supported public LeetCode OAuth flow is available for this extension, and opening `https://leetcode.com/accounts/login/` in the system browser cannot transfer browser cookies to VS Code. Automatic session transfer is explicitly deferred rather than substituted with password collection, headless login, remote debugging, browser-profile access, or an unofficial proxy. Do not treat extension activity as hidden from enterprise endpoint or network monitoring.
 
-Descriptions use an HTML tag allowlist, strip remote attributes, images, scripts, links, and embedded content, and enforce a restrictive Content Security Policy. Webview scripting and command URIs are disabled. Complex math and remote diagrams therefore have rendering limitations.
+- **Anonymous discovery isolation**: Problem browsing, search, topic tags, difficulty filters, Daily Challenge, and free problem opening run anonymously until a session is explicitly verified. Malformed or expired secrets in `SecretStorage` cannot block anonymous discovery.
+- **Explicit session verification**: Credentials (`LEETCODE_SESSION` and `csrftoken` cookie values) are entered only through the separate **Advanced: Import Session** masked fields and stored in VS Code `SecretStorage` only after `userStatus` confirms `isSignedIn === true` and a bounded non-empty username. Failed replacement imports preserve existing stored credentials and state.
+- **Ambiguous failures vs positive expiry**: Network errors, HTTP redirects, and HTTP 403 anti-bot challenges transition account status to **Verification unavailable** while preserving stored secrets. Positive authentication rejection (`HTTP 401` or `isSignedIn: false`) transitions the session to **expired** and clears verified progress state.
+- **Generation and cross-window guards**: `DiscoveryState` and `extension.js` track account and request generations and subscribe to `context.secrets.onDidChange`. Delayed responses from prior filters or accounts are discarded, in-flight writes abort if the account changes during verification, and cached local `.cpp.json` metadata strips remote progress so another account's solved state is never shown.
 
-Filesystem checks reduce accidental access; they do not sandbox VS Code extensions or defend against another process under your OS account deliberately modifying this extension's private files during an operation. The editor and other installed extensions share a trust boundary. Inspect the source and use an OS account and VS Code installation you trust.
+## Local file and webview boundaries
 
-Pending-write records prevent automatic re-submission after uncertain network failure. Polling failures preserve IDs. Cancellation stops polling, not remote execution. A manual clear explicitly warns that LeetCode may still have received the request.
+An explicit remote command accepts only a solution registered in the extension's dedicated global-storage folder (`solutions/`). It validates numbered problem filenames, checks regular files, and rejects path traversal, outside paths, and symbolic links before authenticating and sending the captured editor snapshot. It never falls back to an unrelated active editor.
 
-Known external limitation: LeetCode can reject this client with anti-bot checks, expire sessions, or change its undocumented protocol. No bypass is attempted. Reconnect through the normal browser flow; if blocked, remote actions remain unavailable while cached reading/editing works.
+Only controlled `LcError` messages are surfaced; raw transport/GraphQL exception bodies, cookies, and headers are never logged. The verified username, submitted filename/hash/version, and remote judge output appear in results and recovery metadata.
+
+Problem descriptions use an HTML tag allowlist, strip all attributes, remote images, scripts, links, and embedded content, and enforce a strict Content Security Policy (`default-src 'none'; style-src 'nonce-...'`). Webview scripting and command URIs are disabled.
+
+Pending-write records prevent automatic re-submission after uncertain network failure. Polling failures preserve operation IDs for manual recovery.
+
+Packaging (`scripts/package.js`) uses a deliberate file allowlist with forward-slash ZIP paths and read-back verification so `.git`, `dist`, `node_modules`, environment files, logs, and credentials cannot be bundled into release archives.

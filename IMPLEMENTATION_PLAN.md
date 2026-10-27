@@ -232,4 +232,4 @@ Architecture review: GO for T1, with the following acceptance clarifications:
 - [x] T1 verification defects corrected by Antigravity; 27 tests passed, baseline Windows symlink EPERM remains for T4. Live anonymous list/topics/Daily verified on 2026-10-27.
 - [x] T2 implemented and output verified: 31 tests passed, baseline symlink EPERM remains; desktop rendering not yet verified.
 - [x] T3 implemented and output verified: 35 tests passed, baseline symlink EPERM remains; browser sign-in/session import separation and account lifecycle regression cases covered.
-- [ ] T4 implemented and final output validation completed.
+- [x] T4 implemented and final output validation completed: 37 tests passed, 1 explicit Windows symlink skip, syntax/view/package checks passed, live anonymous smoke passed on 2026-10-27, and 0.2.0 VSIX/source ZIP built in dist. Desktop and authenticated account acceptance remain manual.
