@@ -117,9 +117,104 @@ body {
 
 .lc-btn:focus-visible,
 .lc-tab:focus-visible,
+.lc-input:focus-visible,
+.lc-select:focus-visible,
+.lc-topic-btn:focus-visible,
 .lc-details summary:focus-visible {
   outline: 2px solid var(--vscode-focusBorder);
   outline-offset: 2px;
+}
+
+.lc-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: flex-end;
+}
+
+.lc-filter-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.lc-search-group {
+  flex: 1 1 240px;
+}
+
+.lc-label {
+  font-size: 0.86em;
+  font-weight: 600;
+  color: var(--vscode-descriptionForeground);
+}
+
+.lc-input-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.lc-input,
+.lc-select {
+  background-color: var(--vscode-input-background, var(--vscode-editor-background));
+  color: var(--vscode-input-foreground, var(--vscode-editor-foreground));
+  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, var(--vscode-contrastBorder, #555)));
+  border-radius: 4px;
+  padding: 5px 8px;
+  font-family: inherit;
+  font-size: 0.92em;
+}
+
+.lc-input {
+  flex: 1 1 auto;
+  min-width: 140px;
+}
+
+.lc-select:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.lc-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 0.85em;
+  background-color: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+  border: 1px solid var(--vscode-contrastBorder, transparent);
+  cursor: pointer;
+}
+
+.lc-topic-btn {
+  appearance: none;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-family: inherit;
+  font-size: 0.84em;
+  background-color: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.14));
+  color: var(--vscode-editor-foreground);
+  border: 1px solid var(--vscode-panel-border, var(--vscode-contrastBorder, transparent));
+  cursor: pointer;
+}
+
+.lc-topic-btn[aria-pressed="true"] {
+  background-color: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+  border-color: var(--vscode-focusBorder, transparent);
+  font-weight: 600;
+}
+
+.lc-pagination {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--vscode-panel-border, var(--vscode-contrastBorder, #333));
 }
 
 .lc-btn-secondary {

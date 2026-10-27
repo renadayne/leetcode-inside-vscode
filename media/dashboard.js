@@ -3,6 +3,15 @@
 
   const vscode = typeof acquireVsCodeApi === 'function' ? acquireVsCodeApi() : null;
   const DESTINATIONS = ['explore', 'local', 'account'];
+  const STATUS_LABELS = {
+    ALL: 'All',
+    AC: 'Solved',
+    TRIED: 'Attempted',
+    NOT_STARTED: 'Not started'
+  };
+
+  let searchDraftDirty = false;
+  let lastCommittedQuery = '';
 
   function postAction(payload) {
     if (vscode && typeof vscode.postMessage === 'function') {
@@ -74,6 +83,11 @@
       pill.textContent = state.account.summary || 'Signed out';
     }
 
+    const localTab = document.getElementById('lc-tab-local');
+    if (localTab && Array.isArray(state.localProblems)) {
+      localTab.textContent = 'My Problems (' + state.localProblems.length + ')';
+    }
+
     const currentTitle = document.getElementById('lc-current-problem-title');
     const currentFile = document.getElementById('lc-current-problem-file');
     if (currentTitle && currentFile) {
@@ -88,9 +102,185 @@
         currentFile.textContent = state.currentProblem.fileName || 'Registered C++ solution';
       } else {
         currentTitle.textContent = 'No problem selected';
-        currentFile.textContent = 'Select a problem via the LeetCode sidebar or Open Problem command (dashboard selection wiring in G2/G3).';
+        currentFile.textContent = 'Open a problem from Explore or My Problems below to select a C++ solution.';
       }
     }
+  }
+
+  function syncFilterControls(catalog, account) {
+    if (!catalog || !catalog.filters) return;
+    const filters = catalog.filters;
+    const isVerified = Boolean(account && account.isVerified);
+    const serverQuery = filters.query || '';
+
+    const searchInput = document.getElementById('lc-search-input');
+    if (searchInput) {
+      const isFocused = document.activeElement === searchInput;
+      if (!searchDraftDirty && !isFocused) {
+        searchInput.value = serverQuery;
+      } else if (serverQuery !== lastCommittedQuery && !isFocused) {
+        searchInput.value = serverQuery;
+        searchDraftDirty = false;
+      }
+      lastCommittedQuery = serverQuery;
+    }
+
+    const diffSelect = document.getElementById('lc-difficulty-select');
+    if (diffSelect && document.activeElement !== diffSelect) {
+      diffSelect.value = filters.difficulty || 'ANY';
+    }
+
+    const statusSelect = document.getElementById('lc-status-select');
+    if (statusSelect) {
+      statusSelect.disabled = !isVerified;
+      statusSelect.title = isVerified
+        ? 'Filter by verified LeetCode progress'
+        : 'Verify your LeetCode session in Account to filter by progress';
+      const allOpt = statusSelect.querySelector('option[value="ALL"]');
+      if (allOpt) {
+        allOpt.textContent = isVerified ? 'All Progress' : 'Verify session to filter';
+      }
+      if (document.activeElement !== statusSelect) {
+        statusSelect.value = isVerified && filters.status ? filters.status : 'ALL';
+      }
+    }
+  }
+
+  function renderActiveFilters(catalog, account) {
+    const summaryEl = document.getElementById('lc-filter-summary');
+    if (summaryEl && catalog) {
+      summaryEl.textContent = 'Active summary: ' + (catalog.filterSummary || 'All problems');
+    }
+
+    const container = document.getElementById('lc-active-filters');
+    if (!container || !catalog || !catalog.filters) return;
+    clearChildren(container);
+
+    const filters = catalog.filters;
+    const isVerified = Boolean(account && account.isVerified);
+    let anyChip = false;
+
+    if (filters.query) {
+      anyChip = true;
+      const chip = createEl('button', 'lc-chip', 'Search: "' + filters.query + '" ×');
+      chip.type = 'button';
+      chip.setAttribute('data-action', 'removeFilter');
+      chip.setAttribute('data-filter-kind', 'query');
+      chip.setAttribute('data-focus-key', 'chip:query');
+      chip.title = 'Remove search filter';
+      container.appendChild(chip);
+    }
+
+    if (filters.difficulty && filters.difficulty !== 'ANY') {
+      anyChip = true;
+      const chip = createEl('button', 'lc-chip', 'Difficulty: ' + filters.difficulty + ' ×');
+      chip.type = 'button';
+      chip.setAttribute('data-action', 'removeFilter');
+      chip.setAttribute('data-filter-kind', 'difficulty');
+      chip.setAttribute('data-focus-key', 'chip:difficulty');
+      chip.title = 'Remove difficulty filter';
+      container.appendChild(chip);
+    }
+
+    if (Array.isArray(filters.tags)) {
+      for (const tag of filters.tags) {
+        anyChip = true;
+        const chip = createEl('button', 'lc-chip', 'Topic: ' + tag + ' ×');
+        chip.type = 'button';
+        chip.setAttribute('data-action', 'removeFilter');
+        chip.setAttribute('data-filter-kind', 'tag');
+        chip.setAttribute('data-filter-value', tag);
+        chip.setAttribute('data-focus-key', 'chip:tag:' + tag);
+        chip.title = 'Remove topic filter ' + tag;
+        container.appendChild(chip);
+      }
+    }
+
+    if (isVerified && filters.status && filters.status !== 'ALL') {
+      anyChip = true;
+      const label = STATUS_LABELS[filters.status] || filters.status;
+      const chip = createEl('button', 'lc-chip', 'Progress: ' + label + ' ×');
+      chip.type = 'button';
+      chip.setAttribute('data-action', 'removeFilter');
+      chip.setAttribute('data-filter-kind', 'status');
+      chip.setAttribute('data-focus-key', 'chip:status');
+      chip.title = 'Remove progress filter';
+      container.appendChild(chip);
+    }
+
+    if (anyChip || catalog.hasActiveFilters) {
+      const clearBtn = createEl('button', 'lc-btn lc-btn-secondary', 'Clear Filters');
+      clearBtn.type = 'button';
+      clearBtn.setAttribute('data-action', 'clearFilters');
+      clearBtn.setAttribute('data-focus-key', 'clear-filters');
+      container.appendChild(clearBtn);
+    }
+  }
+
+  function renderTopics(topicsState, catalog) {
+    const body = document.getElementById('lc-topics-body');
+    if (!body) return;
+    clearChildren(body);
+
+    const selected = new Set((catalog && catalog.filters && catalog.filters.tags) || []);
+    const labelEl = document.getElementById('lc-topics-label');
+    if (labelEl) {
+      labelEl.textContent = 'Topics (' + selected.size + ' selected)';
+    }
+
+    if (!topicsState || topicsState.status === 'idle') {
+      if (selected.size > 0) {
+        const row = createEl('div', 'lc-badge-row');
+        for (const slug of selected) {
+          const btn = createEl('button', 'lc-topic-btn', slug);
+          btn.type = 'button';
+          btn.setAttribute('aria-pressed', 'true');
+          btn.setAttribute('data-action', 'toggleTopic');
+          btn.setAttribute('data-tag', slug);
+          btn.setAttribute('data-focus-key', 'topic:' + slug);
+          row.appendChild(btn);
+        }
+        body.appendChild(row);
+      }
+      return;
+    }
+
+    if (topicsState.status === 'loading') {
+      const box = createEl('div', 'lc-status-box');
+      box.setAttribute('role', 'status');
+      box.appendChild(createEl('span', '', 'Loading topic tags…'));
+      body.appendChild(box);
+      return;
+    }
+
+    if (topicsState.status === 'error') {
+      const box = createEl('div', 'lc-status-box lc-status-error');
+      box.setAttribute('role', 'alert');
+      box.appendChild(createEl('span', '', topicsState.error || 'Could not load topic tags.'));
+      const retry = createEl('button', 'lc-btn', 'Retry Topics');
+      retry.type = 'button';
+      retry.setAttribute('data-action', 'loadTopics');
+      retry.setAttribute('data-force', 'true');
+      box.appendChild(retry);
+      body.appendChild(box);
+      return;
+    }
+
+    const items = Array.isArray(topicsState.items) ? topicsState.items : [];
+    if (items.length === 0) return;
+
+    const row = createEl('div', 'lc-badge-row');
+    for (const t of items) {
+      const isSelected = selected.has(t.slug);
+      const btn = createEl('button', 'lc-topic-btn', t.name);
+      btn.type = 'button';
+      btn.setAttribute('aria-pressed', isSelected ? 'true' : 'false');
+      btn.setAttribute('data-action', 'toggleTopic');
+      btn.setAttribute('data-tag', t.slug);
+      btn.setAttribute('data-focus-key', 'topic:' + t.slug);
+      row.appendChild(btn);
+    }
+    body.appendChild(row);
   }
 
   function renderDaily(daily) {
@@ -145,10 +335,18 @@
     main.appendChild(createEl('div', 'lc-item-meta', metaParts.join(' · ')));
     row.appendChild(main);
 
-    const openBtn = createEl('button', 'lc-btn lc-btn-secondary', 'Open (Planned in G2)');
+    const openBtn = createEl(
+      'button',
+      q.supported ? 'lc-btn' : 'lc-btn lc-btn-secondary',
+      q.supported ? 'Open Daily Challenge' : 'Unsupported ID'
+    );
     openBtn.type = 'button';
-    openBtn.disabled = true;
-    openBtn.title = 'Opening problems directly from the dashboard is scheduled for G2. Use the LeetCode sidebar in G1.';
+    openBtn.setAttribute('data-action', 'openProblem');
+    openBtn.setAttribute('data-slug', q.titleSlug);
+    openBtn.setAttribute('data-focus-key', 'daily-open:' + q.titleSlug);
+    openBtn.title = q.supported
+      ? (q.isPaidOnly ? 'Premium problem — requires active LeetCode subscription' : 'Open Daily Challenge in editor')
+      : 'Non-numeric problem IDs are not supported by the C++ workflow';
     row.appendChild(openBtn);
     body.appendChild(row);
 
@@ -168,14 +366,11 @@
   }
 
   function renderCatalog(catalog, account) {
-    const summaryEl = document.getElementById('lc-filter-summary');
-    if (summaryEl && catalog) {
-      summaryEl.textContent = 'Active summary: ' + (catalog.filterSummary || 'All problems');
-    }
-
     const body = document.getElementById('lc-catalog-body');
+    const pageBar = document.getElementById('lc-pagination-bar');
     if (!body || !catalog) return;
     clearChildren(body);
+    if (pageBar) clearChildren(pageBar);
 
     if (catalog.status === 'loading') {
       const box = createEl('div', 'lc-status-box');
@@ -202,6 +397,12 @@
     if (questions.length === 0) {
       const box = createEl('div', 'lc-status-box');
       box.appendChild(createEl('span', '', 'No matching LeetCode problems found.'));
+      if (catalog.hasActiveFilters) {
+        const clearBtn = createEl('button', 'lc-btn lc-btn-secondary', 'Clear Filters');
+        clearBtn.type = 'button';
+        clearBtn.setAttribute('data-action', 'clearFilters');
+        box.appendChild(clearBtn);
+      }
       body.appendChild(box);
       return;
     }
@@ -218,17 +419,53 @@
       if (account && account.isVerified && q.progress) {
         metaParts.push(q.progress);
       }
+      if (Array.isArray(q.topicTags) && q.topicTags.length > 0) {
+        metaParts.push(q.topicTags.map(function (t) { return t.name; }).join(', '));
+      }
       main.appendChild(createEl('div', 'lc-item-meta', metaParts.join(' · ')));
       item.appendChild(main);
 
-      const openBtn = createEl('button', 'lc-btn lc-btn-secondary', 'Open (Planned in G2)');
+      const openBtn = createEl(
+        'button',
+        q.supported ? 'lc-btn' : 'lc-btn lc-btn-secondary',
+        q.supported ? 'Open' : 'Unsupported ID'
+      );
       openBtn.type = 'button';
-      openBtn.disabled = true;
-      openBtn.title = 'Direct problem opening in the dashboard is scheduled for G2. Use the LeetCode sidebar in G1.';
+      openBtn.setAttribute('data-action', 'openProblem');
+      openBtn.setAttribute('data-slug', q.titleSlug);
+      openBtn.setAttribute('data-focus-key', 'catalog-open:' + q.titleSlug);
+      openBtn.title = q.supported
+        ? (q.isPaidOnly ? 'Premium problem — requires active LeetCode subscription' : 'Open problem in editor')
+        : 'Non-numeric problem IDs are not supported by the C++ workflow';
       item.appendChild(openBtn);
       list.appendChild(item);
     }
     body.appendChild(list);
+
+    if (pageBar) {
+      const start = catalog.skip + 1;
+      const end = catalog.skip + questions.length;
+      pageBar.appendChild(createEl('span', 'lc-muted', 'Showing ' + start + '–' + end + ' of ' + catalog.total));
+
+      const btnRow = createEl('div', 'lc-action-row');
+      const prevBtn = createEl('button', 'lc-btn lc-btn-secondary', 'Previous Page');
+      prevBtn.type = 'button';
+      prevBtn.disabled = !(catalog.skip > 0);
+      prevBtn.setAttribute('data-action', 'changePage');
+      prevBtn.setAttribute('data-direction', 'prev');
+      prevBtn.setAttribute('data-focus-key', 'page:prev');
+      btnRow.appendChild(prevBtn);
+
+      const nextBtn = createEl('button', 'lc-btn lc-btn-secondary', 'Next Page');
+      nextBtn.type = 'button';
+      nextBtn.disabled = !catalog.hasMore;
+      nextBtn.setAttribute('data-action', 'changePage');
+      nextBtn.setAttribute('data-direction', 'next');
+      nextBtn.setAttribute('data-focus-key', 'page:next');
+      btnRow.appendChild(nextBtn);
+
+      pageBar.appendChild(btnRow);
+    }
   }
 
   function renderLocal(localProblems) {
@@ -239,7 +476,7 @@
     const items = Array.isArray(localProblems) ? localProblems : [];
     if (items.length === 0) {
       const box = createEl('div', 'lc-status-box');
-      box.appendChild(createEl('span', '', 'No saved local problems yet. Open a problem to create a local C++ solution file.'));
+      box.appendChild(createEl('span', '', 'No saved local problems yet. Open a problem from Explore to create a local C++ solution file.'));
       body.appendChild(box);
       return;
     }
@@ -252,10 +489,12 @@
       main.appendChild(createEl('div', 'lc-item-meta', q.difficulty + ' · ' + (q.availability || 'Available locally')));
       li.appendChild(main);
 
-      const openBtn = createEl('button', 'lc-btn lc-btn-secondary', 'Open Local (Planned in G2)');
+      const openBtn = createEl('button', 'lc-btn', 'Open Local');
       openBtn.type = 'button';
-      openBtn.disabled = true;
-      openBtn.title = 'Reopening local solutions from the dashboard is scheduled for G2. Use the LeetCode sidebar Local Problems section in G1.';
+      openBtn.setAttribute('data-action', 'openLocal');
+      openBtn.setAttribute('data-slug', q.titleSlug);
+      openBtn.setAttribute('data-focus-key', 'local-open:' + q.titleSlug);
+      openBtn.title = 'Reopen saved local C++ solution offline without overwriting existing code';
       li.appendChild(openBtn);
       list.appendChild(li);
     }
@@ -273,19 +512,65 @@
     }
   }
 
+  function restoreFocusByKey(focusKey) {
+    if (!focusKey || document.activeElement !== document.body) return;
+    const candidates = document.querySelectorAll('[data-focus-key]');
+    for (const el of candidates) {
+      if (el.getAttribute('data-focus-key') === focusKey && !el.hasAttribute('disabled')) {
+        el.focus();
+        break;
+      }
+    }
+  }
+
   function applyState(state) {
     if (!state || typeof state !== 'object') return;
+    const activeFocusKey = document.activeElement instanceof Element
+      ? document.activeElement.getAttribute('data-focus-key')
+      : null;
+
     setDestinationDom(state.destination);
     renderNotice(state);
     renderHeaderAndCurrent(state);
+    syncFilterControls(state.catalog, state.account);
+    renderActiveFilters(state.catalog, state.account);
+    renderTopics(state.topics, state.catalog);
     renderDaily(state.daily);
     renderCatalog(state.catalog, state.account);
     renderLocal(state.localProblems);
     renderAccount(state.account);
+    restoreFocusByKey(activeFocusKey);
+
     if (vscode && typeof vscode.setState === 'function') {
       vscode.setState({ destination: state.destination });
     }
   }
+
+  function submitSearchInput() {
+    const searchInput = document.getElementById('lc-search-input');
+    const query = searchInput ? searchInput.value : '';
+    searchDraftDirty = false;
+    lastCommittedQuery = query.trim();
+    postAction({ action: 'setFilters', filters: { query: query } });
+  }
+
+  document.addEventListener('input', function (event) {
+    const target = event.target;
+    if (target instanceof HTMLInputElement && target.id === 'lc-search-input') {
+      searchDraftDirty = true;
+    }
+  });
+
+  document.addEventListener('change', function (event) {
+    const target = event.target;
+    if (!(target instanceof HTMLSelectElement)) return;
+    const filterKind = target.getAttribute('data-filter-select');
+    if (filterKind === 'difficulty') {
+      postAction({ action: 'setFilters', filters: { difficulty: target.value } });
+    } else if (filterKind === 'status') {
+      postAction({ action: 'setFilters', filters: { status: target.value } });
+    }
+  });
 
   document.addEventListener('click', function (event) {
     const target = event.target instanceof Element ? event.target.closest('[data-action]') : null;
@@ -302,10 +587,55 @@
       postAction({ action: 'refresh', target: refreshTarget });
     } else if (action === 'dismissNotice') {
       postAction({ action: 'dismissNotice' });
+    } else if (action === 'submitSearch') {
+      submitSearchInput();
+    } else if (action === 'openProblem') {
+      const slug = target.getAttribute('data-slug');
+      if (slug) postAction({ action: 'openProblem', titleSlug: slug });
+    } else if (action === 'openLocal') {
+      const slug = target.getAttribute('data-slug');
+      if (slug) postAction({ action: 'openLocal', titleSlug: slug });
+    } else if (action === 'loadTopics') {
+      const force = target.getAttribute('data-force') === 'true';
+      postAction({ action: 'loadTopics', force: force });
+    } else if (action === 'toggleTopic') {
+      const tag = target.getAttribute('data-tag');
+      if (tag) postAction({ action: 'toggleTopic', tag: tag });
+    } else if (action === 'removeFilter') {
+      const kind = target.getAttribute('data-filter-kind');
+      const value = target.getAttribute('data-filter-value') || undefined;
+      if (kind === 'query') {
+        searchDraftDirty = false;
+        lastCommittedQuery = '';
+        const searchInput = document.getElementById('lc-search-input');
+        if (searchInput) searchInput.value = '';
+      }
+      if (kind) {
+        postAction(value !== undefined ? { action: 'removeFilter', kind: kind, value: value } : { action: 'removeFilter', kind: kind });
+      }
+    } else if (action === 'clearFilters') {
+      searchDraftDirty = false;
+      lastCommittedQuery = '';
+      const searchInput = document.getElementById('lc-search-input');
+      if (searchInput) searchInput.value = '';
+      postAction({ action: 'clearFilters' });
+    } else if (action === 'changePage') {
+      const direction = target.getAttribute('data-direction');
+      if (direction === 'next' || direction === 'prev') {
+        postAction({ action: 'changePage', direction: direction });
+      }
     }
   });
 
   document.addEventListener('keydown', function (event) {
+    if (event.target instanceof HTMLInputElement && event.target.id === 'lc-search-input') {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        submitSearchInput();
+      }
+      return;
+    }
+
     const tab = event.target instanceof Element ? event.target.closest('[role="tab"][data-destination]') : null;
     if (!tab) return;
     const tabs = Array.from(document.querySelectorAll('[role="tab"][data-destination]'));

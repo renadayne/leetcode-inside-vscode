@@ -237,7 +237,7 @@ Architecture review: GO for T1, with the following acceptance clarifications:
 ## Next phase: unified OpenGUI dashboard
 
 Planned: 2026-10-27. Baseline: 0.2.0, `69e0108`.
-Status: authorized; G1 implemented.
+Status: authorized; G1 and G2 implemented.
 
 ### Outcome and scope
 
@@ -387,7 +387,7 @@ Commit: `build: package and document the LeetCode dashboard`
 
 - [x] Feasibility and interaction plan recorded; no extra installation required.
 - [x] G1: dashboard shell and action bridge implemented (`lc.openGUI`, single-panel lifecycle, Explore/My Problems/Account navigation, bundled theme-aware assets, strict CSP/resource roots, validated message bridge, loading/error states, and focused tests: 40 passed, 1 Windows symlink skip).
-- [ ] G2: discovery and local solutions.
+- [x] G2: discovery and local solutions implemented (Daily/catalog/local click-to-open via shared flows, Enter/button search, difficulty/multi-topic/verified-progress filters, removable filter chips and reset, pagination, stale-response and Daily date/stale guards, non-destructive filter input/focus updates, and focused tests: 42 passed, 1 Windows symlink skip).
 - [ ] G3: current-problem actions and results.
 - [ ] G4: account controls and command discoverability.
 - [ ] G5: integration validation, documentation and packaging.

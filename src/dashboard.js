@@ -2,6 +2,15 @@
 
 const path = require('node:path');
 const { randomBytes } = require('node:crypto');
+const {
+  LcError,
+  MAX_QUERY_LENGTH,
+  MAX_TOPIC_FILTERS
+} = require('./api');
+const {
+  VALID_DIFFICULTIES,
+  VALID_STATUSES
+} = require('./discovery');
 const { escape } = require('./render');
 const {
   boundText,
@@ -11,13 +20,27 @@ const {
 
 const DASHBOARD_VIEW_TYPE = 'lc.dashboard';
 const VALID_DESTINATIONS = new Set(['explore', 'local', 'account']);
-const VALID_REFRESH_TARGETS = new Set(['all', 'daily', 'catalog', 'local']);
-const G1_ACTIVE_ACTIONS = new Set(['ready', 'navigate', 'refresh', 'dismissNotice']);
-const PLANNED_ACTIONS = new Set([
+const VALID_REFRESH_TARGETS = new Set(['all', 'daily', 'catalog', 'local', 'topics']);
+const VALID_REMOVE_FILTER_KINDS = new Set(['query', 'difficulty', 'status', 'tag']);
+const G1_ACTIVE_ACTIONS = new Set([
+  'ready',
+  'navigate',
+  'refresh',
+  'dismissNotice',
   'openProblem',
   'openLocal',
   'setFilters',
-  'changePage',
+  'setSearch',
+  'setDifficulty',
+  'setTopics',
+  'setStatus',
+  'toggleTopic',
+  'removeFilter',
+  'clearFilters',
+  'loadTopics',
+  'changePage'
+]);
+const PLANNED_ACTIONS = new Set([
   'problemAction',
   'accountAction'
 ]);
@@ -59,6 +82,13 @@ const FORBIDDEN_MESSAGE_KEYS = new Set([
   'secret'
 ]);
 
+const STATUS_LABELS = {
+  ALL: 'All',
+  AC: 'Solved',
+  TRIED: 'Attempted',
+  NOT_STARTED: 'Not started'
+};
+
 function isPlainObject(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const proto = Object.getPrototypeOf(value);
@@ -83,6 +113,57 @@ function isValidSlug(value) {
   );
 }
 
+function isValidQueryText(value) {
+  return (
+    typeof value === 'string' &&
+    value.length <= MAX_QUERY_LENGTH &&
+    !/[\x00-\x1F\x7F]/.test(value)
+  );
+}
+
+function isValidDifficultyValue(value) {
+  return typeof value === 'string' && VALID_DIFFICULTIES.has(value.trim().toUpperCase());
+}
+
+function isValidStatusValue(value) {
+  return typeof value === 'string' && VALID_STATUSES.has(value.trim().toUpperCase());
+}
+
+function isValidTagsArray(value) {
+  return (
+    Array.isArray(value) &&
+    value.length <= MAX_TOPIC_FILTERS &&
+    value.every(isValidSlug)
+  );
+}
+
+function validateFiltersObject(filters) {
+  if (!isPlainObject(filters)) return null;
+  const keys = Object.keys(filters);
+  if (keys.length === 0 || keys.length > 4) return null;
+
+  const clean = {};
+  for (const k of keys) {
+    if (FORBIDDEN_MESSAGE_KEYS.has(k) || !['query', 'difficulty', 'tags', 'status'].includes(k)) {
+      return null;
+    }
+    if (k === 'query') {
+      if (!isValidQueryText(filters.query)) return null;
+      clean.query = filters.query.trim();
+    } else if (k === 'difficulty') {
+      if (!isValidDifficultyValue(filters.difficulty)) return null;
+      clean.difficulty = filters.difficulty.trim().toUpperCase();
+    } else if (k === 'tags') {
+      if (!isValidTagsArray(filters.tags)) return null;
+      clean.tags = [...new Set(filters.tags)];
+    } else if (k === 'status') {
+      if (!isValidStatusValue(filters.status)) return null;
+      clean.status = filters.status.trim().toUpperCase();
+    }
+  }
+  return clean;
+}
+
 function validateDashboardMessage(raw) {
   if (!isPlainObject(raw)) {
     return { ok: false, code: 'INVALID_MESSAGE', message: 'Dashboard message must be a plain object.' };
@@ -103,7 +184,7 @@ function validateDashboardMessage(raw) {
     return { ok: false, code: 'INVALID_MESSAGE', message: 'Invalid message type.' };
   }
 
-  if (action === 'ready' || action === 'dismissNotice') {
+  if (action === 'ready' || action === 'dismissNotice' || action === 'clearFilters') {
     if (!hasOnlyAllowedKeys(raw, new Set(['action', 'type']))) {
       return { ok: false, code: 'INVALID_MESSAGE', message: `Unexpected payload for ${action}.` };
     }
@@ -131,16 +212,97 @@ function validateDashboardMessage(raw) {
     return { ok: true, action: 'refresh', payload: { target } };
   }
 
+  if (action === 'openProblem' || action === 'openLocal') {
+    if (!hasOnlyAllowedKeys(raw, new Set(['action', 'type', 'titleSlug'])) || !isValidSlug(raw.titleSlug)) {
+      return { ok: false, code: 'INVALID_MESSAGE', message: 'Invalid problem slug in dashboard message.' };
+    }
+    return { ok: true, action, payload: { titleSlug: raw.titleSlug } };
+  }
+
+  if (action === 'changePage') {
+    if (!hasOnlyAllowedKeys(raw, new Set(['action', 'type', 'direction'])) || (raw.direction !== 'next' && raw.direction !== 'prev')) {
+      return { ok: false, code: 'INVALID_MESSAGE', message: 'Invalid pagination direction.' };
+    }
+    return { ok: true, action: 'changePage', payload: { direction: raw.direction } };
+  }
+
+  if (action === 'loadTopics') {
+    if (!hasOnlyAllowedKeys(raw, new Set(['action', 'type', 'force']))) {
+      return { ok: false, code: 'INVALID_MESSAGE', message: 'Unexpected payload for loadTopics.' };
+    }
+    if (raw.force !== undefined && typeof raw.force !== 'boolean') {
+      return { ok: false, code: 'INVALID_MESSAGE', message: 'Invalid force flag for loadTopics.' };
+    }
+    return { ok: true, action: 'loadTopics', payload: { force: Boolean(raw.force) } };
+  }
+
+  if (action === 'toggleTopic') {
+    if (!hasOnlyAllowedKeys(raw, new Set(['action', 'type', 'tag'])) || !isValidSlug(raw.tag)) {
+      return { ok: false, code: 'INVALID_MESSAGE', message: 'Invalid topic tag slug.' };
+    }
+    return { ok: true, action: 'toggleTopic', payload: { tag: raw.tag } };
+  }
+
+  if (action === 'removeFilter') {
+    if (!hasOnlyAllowedKeys(raw, new Set(['action', 'type', 'kind', 'value']))) {
+      return { ok: false, code: 'INVALID_MESSAGE', message: 'Unexpected payload for removeFilter.' };
+    }
+    if (typeof raw.kind !== 'string' || !VALID_REMOVE_FILTER_KINDS.has(raw.kind)) {
+      return { ok: false, code: 'INVALID_MESSAGE', message: 'Invalid filter kind to remove.' };
+    }
+    if (raw.kind === 'tag') {
+      if (!isValidSlug(raw.value)) {
+        return { ok: false, code: 'INVALID_MESSAGE', message: 'Invalid topic slug to remove.' };
+      }
+      return { ok: true, action: 'removeFilter', payload: { kind: 'tag', value: raw.value } };
+    }
+    if (raw.value !== undefined) {
+      return { ok: false, code: 'INVALID_MESSAGE', message: 'Unexpected value for removeFilter.' };
+    }
+    return { ok: true, action: 'removeFilter', payload: { kind: raw.kind } };
+  }
+
+  if (action === 'setSearch') {
+    if (!hasOnlyAllowedKeys(raw, new Set(['action', 'type', 'query'])) || !isValidQueryText(raw.query)) {
+      return { ok: false, code: 'INVALID_MESSAGE', message: 'Invalid search query.' };
+    }
+    return { ok: true, action: 'setFilters', payload: { filters: { query: raw.query.trim() } } };
+  }
+
+  if (action === 'setDifficulty') {
+    if (!hasOnlyAllowedKeys(raw, new Set(['action', 'type', 'difficulty'])) || !isValidDifficultyValue(raw.difficulty)) {
+      return { ok: false, code: 'INVALID_MESSAGE', message: 'Invalid difficulty filter.' };
+    }
+    return { ok: true, action: 'setFilters', payload: { filters: { difficulty: raw.difficulty.trim().toUpperCase() } } };
+  }
+
+  if (action === 'setTopics') {
+    if (!hasOnlyAllowedKeys(raw, new Set(['action', 'type', 'tags'])) || !isValidTagsArray(raw.tags)) {
+      return { ok: false, code: 'INVALID_MESSAGE', message: 'Invalid topic filters.' };
+    }
+    return { ok: true, action: 'setFilters', payload: { filters: { tags: [...new Set(raw.tags)] } } };
+  }
+
+  if (action === 'setStatus') {
+    if (!hasOnlyAllowedKeys(raw, new Set(['action', 'type', 'status'])) || !isValidStatusValue(raw.status)) {
+      return { ok: false, code: 'INVALID_MESSAGE', message: 'Invalid progress filter.' };
+    }
+    return { ok: true, action: 'setFilters', payload: { filters: { status: raw.status.trim().toUpperCase() } } };
+  }
+
+  if (action === 'setFilters') {
+    if (!hasOnlyAllowedKeys(raw, new Set(['action', 'type', 'filters']))) {
+      return { ok: false, code: 'INVALID_MESSAGE', message: 'Unexpected payload for setFilters.' };
+    }
+    const clean = validateFiltersObject(raw.filters);
+    if (!clean) {
+      return { ok: false, code: 'INVALID_MESSAGE', message: 'Invalid filters payload.' };
+    }
+    return { ok: true, action: 'setFilters', payload: { filters: clean } };
+  }
+
   if (PLANNED_ACTIONS.has(action)) {
-    if (action === 'openProblem' || action === 'openLocal') {
-      if (!hasOnlyAllowedKeys(raw, new Set(['action', 'type', 'titleSlug'])) || !isValidSlug(raw.titleSlug)) {
-        return { ok: false, code: 'INVALID_MESSAGE', message: 'Invalid problem slug in dashboard message.' };
-      }
-    } else if (action === 'changePage') {
-      if (!hasOnlyAllowedKeys(raw, new Set(['action', 'type', 'direction'])) || (raw.direction !== 'next' && raw.direction !== 'prev')) {
-        return { ok: false, code: 'INVALID_MESSAGE', message: 'Invalid pagination direction.' };
-      }
-    } else if (action === 'problemAction') {
+    if (action === 'problemAction') {
       if (!hasOnlyAllowedKeys(raw, new Set(['action', 'type', 'kind'])) || typeof raw.kind !== 'string' || !VALID_PROBLEM_ACTIONS.has(raw.kind)) {
         return { ok: false, code: 'INVALID_MESSAGE', message: 'Invalid problem action kind.' };
       }
@@ -148,21 +310,12 @@ function validateDashboardMessage(raw) {
       if (!hasOnlyAllowedKeys(raw, new Set(['action', 'type', 'kind'])) || typeof raw.kind !== 'string' || !VALID_ACCOUNT_ACTIONS.has(raw.kind)) {
         return { ok: false, code: 'INVALID_MESSAGE', message: 'Invalid account action kind.' };
       }
-    } else if (action === 'setFilters') {
-      if (!hasOnlyAllowedKeys(raw, new Set(['action', 'type', 'filters'])) || !isPlainObject(raw.filters)) {
-        return { ok: false, code: 'INVALID_MESSAGE', message: 'Invalid filters payload.' };
-      }
-      for (const k of Object.keys(raw.filters)) {
-        if (FORBIDDEN_MESSAGE_KEYS.has(k) || !['query', 'difficulty', 'tags', 'status'].includes(k)) {
-          return { ok: false, code: 'INVALID_MESSAGE', message: 'Invalid filter property.' };
-        }
-      }
     }
     return {
       ok: false,
       code: 'UNIMPLEMENTED',
       action,
-      message: `Action "${action}" is not yet implemented in G1 (Dashboard shell). Use the LeetCode sidebar or editor commands until G2–G4 are completed.`
+      message: `Action "${action}" is scheduled for a later OpenGUI task (G3–G4). Use the LeetCode sidebar or editor commands until G3–G4 are completed.`
     };
   }
 
@@ -204,6 +357,54 @@ function sanitizeQuestionForView(q, isVerified) {
   };
 }
 
+function renderActiveFiltersHtml(catalog, account) {
+  const filters = catalog.filters || { query: '', difficulty: 'ANY', tags: [], status: 'ALL' };
+  const chips = [];
+  if (filters.query) {
+    chips.push(`<button type="button" class="lc-chip" data-action="removeFilter" data-filter-kind="query" data-focus-key="chip:query" title="Remove search filter">Search: &quot;${escape(filters.query)}&quot; ×</button>`);
+  }
+  if (filters.difficulty && filters.difficulty !== 'ANY') {
+    chips.push(`<button type="button" class="lc-chip" data-action="removeFilter" data-filter-kind="difficulty" data-focus-key="chip:difficulty" title="Remove difficulty filter">Difficulty: ${escape(filters.difficulty)} ×</button>`);
+  }
+  if (Array.isArray(filters.tags)) {
+    for (const tag of filters.tags) {
+      chips.push(`<button type="button" class="lc-chip" data-action="removeFilter" data-filter-kind="tag" data-filter-value="${escape(tag)}" data-focus-key="chip:tag:${escape(tag)}" title="Remove topic filter ${escape(tag)}">Topic: ${escape(tag)} ×</button>`);
+    }
+  }
+  if (account.isVerified && filters.status && filters.status !== 'ALL') {
+    const label = STATUS_LABELS[filters.status] || filters.status;
+    chips.push(`<button type="button" class="lc-chip" data-action="removeFilter" data-filter-kind="status" data-focus-key="chip:status" title="Remove progress filter">Progress: ${escape(label)} ×</button>`);
+  }
+  if (chips.length > 0 || catalog.hasActiveFilters) {
+    chips.push('<button type="button" class="lc-btn lc-btn-secondary" data-action="clearFilters" data-focus-key="clear-filters">Clear Filters</button>');
+  }
+  return chips.join('');
+}
+
+function renderTopicsHtml(topics, catalog) {
+  const selected = new Set((catalog.filters && catalog.filters.tags) || []);
+  if (!topics || topics.status === 'idle') {
+    if (selected.size === 0) return '';
+    const activePills = [...selected].map(slug =>
+      `<button type="button" class="lc-topic-btn" aria-pressed="true" data-action="toggleTopic" data-tag="${escape(slug)}" data-focus-key="topic:${escape(slug)}">${escape(slug)}</button>`
+    ).join('');
+    return `<div class="lc-badge-row">${activePills}</div>`;
+  }
+  if (topics.status === 'loading') {
+    return '<div class="lc-status-box" role="status"><span>Loading topic tags…</span></div>';
+  }
+  if (topics.status === 'error') {
+    return `<div class="lc-status-box lc-status-error" role="alert"><span>${escape(topics.error || 'Could not load topic tags.')}</span><button type="button" class="lc-btn" data-action="loadTopics" data-force="true">Retry Topics</button></div>`;
+  }
+  const items = Array.isArray(topics.items) ? topics.items : [];
+  if (items.length === 0) return '';
+  const buttons = items.map(t => {
+    const isSelected = selected.has(t.slug);
+    return `<button type="button" class="lc-topic-btn" aria-pressed="${isSelected ? 'true' : 'false'}" data-action="toggleTopic" data-tag="${escape(t.slug)}" data-focus-key="topic:${escape(t.slug)}">${escape(t.name)}</button>`;
+  }).join('');
+  return `<div class="lc-badge-row">${buttons}</div>`;
+}
+
 function renderDailyHtml(daily) {
   if (daily.status === 'loading' && !daily.question) {
     return '<div class="lc-status-box" role="status"><span>Loading Daily Challenge…</span></div>';
@@ -223,7 +424,13 @@ function renderDailyHtml(daily) {
   if (q.isPaidOnly) metaParts.push('Premium');
   if (q.progress) metaParts.push(q.progress);
 
-  let html = `<div class="lc-list-item"><div class="lc-item-main"><div class="lc-item-title">${escape(q.questionFrontendId)}. ${escape(q.title)}</div><div class="lc-item-meta">${escape(metaParts.join(' · '))}</div></div><button type="button" class="lc-btn lc-btn-secondary" disabled title="Opening problems directly from the dashboard is scheduled for G2. Use the LeetCode sidebar in G1.">Open (Planned in G2)</button></div>`;
+  const btnClass = q.supported ? 'lc-btn' : 'lc-btn lc-btn-secondary';
+  const btnLabel = q.supported ? 'Open Daily Challenge' : 'Unsupported ID';
+  const btnTitle = q.supported
+    ? (q.isPaidOnly ? 'Premium problem — requires active LeetCode subscription' : 'Open Daily Challenge in editor')
+    : 'Non-numeric problem IDs are not supported by the C++ workflow';
+
+  let html = `<div class="lc-list-item"><div class="lc-item-main"><div class="lc-item-title">${escape(q.questionFrontendId)}. ${escape(q.title)}</div><div class="lc-item-meta">${escape(metaParts.join(' · '))}</div></div><button type="button" class="${btnClass}" data-action="openProblem" data-slug="${escape(q.titleSlug)}" data-focus-key="daily-open:${escape(q.titleSlug)}" title="${escape(btnTitle)}">${escape(btnLabel)}</button></div>`;
 
   if (daily.stale) {
     html += `<div class="lc-status-box lc-status-error" role="status"><span>Refresh failed (${escape(daily.error || 'network error')}). Showing last known date ${escape(daily.date || '')}.</span><button type="button" class="lc-btn" data-action="refresh" data-target="daily">Retry Daily Challenge</button></div>`;
@@ -240,7 +447,10 @@ function renderCatalogHtml(catalog, account) {
   }
   const questions = Array.isArray(catalog.questions) ? catalog.questions : [];
   if (questions.length === 0) {
-    return '<div class="lc-status-box"><span>No matching LeetCode problems found.</span></div>';
+    const clearBtn = catalog.hasActiveFilters
+      ? '<button type="button" class="lc-btn lc-btn-secondary" data-action="clearFilters">Clear Filters</button>'
+      : '';
+    return `<div class="lc-status-box"><span>No matching LeetCode problems found.</span>${clearBtn}</div>`;
   }
 
   const items = questions.map(q => {
@@ -248,18 +458,37 @@ function renderCatalogHtml(catalog, account) {
     if (!q.supported) metaParts.push('Unsupported ID');
     if (q.isPaidOnly) metaParts.push('Premium');
     if (account.isVerified && q.progress) metaParts.push(q.progress);
-    return `<li class="lc-list-item"><div class="lc-item-main"><div class="lc-item-title">${escape(q.questionFrontendId)}. ${escape(q.title)}</div><div class="lc-item-meta">${escape(metaParts.join(' · '))}</div></div><button type="button" class="lc-btn lc-btn-secondary" disabled title="Direct problem opening in the dashboard is scheduled for G2. Use the LeetCode sidebar in G1.">Open (Planned in G2)</button></li>`;
+    if (Array.isArray(q.topicTags) && q.topicTags.length > 0) {
+      metaParts.push(q.topicTags.map(t => t.name).join(', '));
+    }
+    const btnClass = q.supported ? 'lc-btn' : 'lc-btn lc-btn-secondary';
+    const btnLabel = q.supported ? 'Open' : 'Unsupported ID';
+    const btnTitle = q.supported
+      ? (q.isPaidOnly ? 'Premium problem — requires active LeetCode subscription' : 'Open problem in editor')
+      : 'Non-numeric problem IDs are not supported by the C++ workflow';
+    return `<li class="lc-list-item"><div class="lc-item-main"><div class="lc-item-title">${escape(q.questionFrontendId)}. ${escape(q.title)}</div><div class="lc-item-meta">${escape(metaParts.join(' · '))}</div></div><button type="button" class="${btnClass}" data-action="openProblem" data-slug="${escape(q.titleSlug)}" data-focus-key="catalog-open:${escape(q.titleSlug)}" title="${escape(btnTitle)}">${escape(btnLabel)}</button></li>`;
   }).join('');
 
   return `<ul class="lc-list">${items}</ul>`;
 }
 
+function renderPaginationHtml(catalog) {
+  if (catalog.status !== 'ready' || !Array.isArray(catalog.questions) || catalog.questions.length === 0) {
+    return '';
+  }
+  const start = catalog.skip + 1;
+  const end = catalog.skip + catalog.questions.length;
+  const prevDisabled = catalog.skip > 0 ? '' : ' disabled';
+  const nextDisabled = catalog.hasMore ? '' : ' disabled';
+  return `<span class="lc-muted">Showing ${start}–${end} of ${catalog.total}</span><div class="lc-action-row"><button type="button" class="lc-btn lc-btn-secondary" data-action="changePage" data-direction="prev" data-focus-key="page:prev"${prevDisabled}>Previous Page</button><button type="button" class="lc-btn lc-btn-secondary" data-action="changePage" data-direction="next" data-focus-key="page:next"${nextDisabled}>Next Page</button></div>`;
+}
+
 function renderLocalHtml(localProblems) {
   if (!Array.isArray(localProblems) || localProblems.length === 0) {
-    return '<div class="lc-status-box"><span>No saved local problems yet. Open a problem to create a local C++ solution file.</span></div>';
+    return '<div class="lc-status-box"><span>No saved local problems yet. Open a problem from Explore to create a local C++ solution file.</span></div>';
   }
   const items = localProblems.map(q =>
-    `<li class="lc-list-item"><div class="lc-item-main"><div class="lc-item-title">${escape(q.questionFrontendId)}. ${escape(q.title)}</div><div class="lc-item-meta">${escape(q.difficulty)} · ${escape(q.availability || 'Available locally')}</div></div><button type="button" class="lc-btn lc-btn-secondary" disabled title="Reopening local solutions from the dashboard is scheduled for G2. Use the LeetCode sidebar Local Problems section in G1.">Open Local (Planned in G2)</button></li>`
+    `<li class="lc-list-item"><div class="lc-item-main"><div class="lc-item-title">${escape(q.questionFrontendId)}. ${escape(q.title)}</div><div class="lc-item-meta">${escape(q.difficulty)} · ${escape(q.availability || 'Available locally')}</div></div><button type="button" class="lc-btn" data-action="openLocal" data-slug="${escape(q.titleSlug)}" data-focus-key="local-open:${escape(q.titleSlug)}" title="Reopen saved local C++ solution offline without overwriting existing code">Open Local</button></li>`
   ).join('');
   return `<ul class="lc-list">${items}</ul>`;
 }
@@ -269,6 +498,9 @@ class LeetCodeDashboard {
     this.vscode = vscode;
     this.context = context;
     this.discovery = options.discovery;
+    this.openProblemBySlug = options.openProblemBySlug;
+    this.openLocalProblem = options.openLocalProblem;
+    this.onError = options.onError;
     this.getLocalProblems = options.getLocalProblems || (async () => []);
     this.getCurrentProblem = options.getCurrentProblem || (async () => undefined);
     this.mediaRoot = options.mediaRoot || path.resolve(__dirname, '..', 'media');
@@ -377,6 +609,7 @@ class LeetCodeDashboard {
     const isVerified = Boolean(this.discovery?.isVerified);
     const daily = this.discovery?.daily || { status: 'idle', data: undefined, stale: false, error: undefined };
     const cat = this.discovery?.catalog || { status: 'idle', questions: [], total: 0, limit: 50, skip: 0, hasMore: false, error: undefined };
+    const topics = this.discovery?.topics || { status: 'idle', items: [], error: undefined };
     const filters = this.discovery?.filters || { query: '', difficulty: 'ANY', tags: [], status: 'ALL' };
 
     let locals = [];
@@ -395,7 +628,7 @@ class LeetCodeDashboard {
     }
 
     return {
-      phase: 'G1',
+      phase: 'G2',
       destination: VALID_DESTINATIONS.has(this.destination) ? this.destination : 'explore',
       notice: this.notice ? { kind: this.notice.kind, code: this.notice.code, message: boundText(this.notice.message, 240) } : null,
       account: {
@@ -420,6 +653,16 @@ class LeetCodeDashboard {
         date: daily.data?.date ? boundText(daily.data.date, 20) : null,
         error: daily.error ? boundText(daily.error, 160) : null,
         question: daily.data?.question ? sanitizeQuestionForView(daily.data.question, isVerified) : null
+      },
+      topics: {
+        status: topics.status || 'idle',
+        error: topics.error ? boundText(topics.error, 160) : null,
+        items: Array.isArray(topics.items)
+          ? topics.items.slice(0, 200).map(t => ({
+              name: boundText(t.name, 40),
+              slug: boundText(t.slug, 40)
+            }))
+          : []
       },
       catalog: {
         status: cat.status || 'idle',
@@ -476,6 +719,59 @@ class LeetCodeDashboard {
     return state;
   }
 
+  async _applyFiltersToDiscovery(filters) {
+    if (!this.discovery) return;
+    if (filters.status !== undefined && filters.status !== 'ALL' && !this.discovery.isVerified) {
+      throw Object.assign(
+        new LcError('AUTH', 'Verify your LeetCode session before filtering by account progress.'),
+        { preserveAccountState: true }
+      );
+    }
+
+    const keys = Object.keys(filters);
+    if (keys.length === 1) {
+      if (keys[0] === 'query') {
+        await this.discovery.setSearchQuery(filters.query);
+        return;
+      }
+      if (keys[0] === 'difficulty') {
+        await this.discovery.setDifficulty(filters.difficulty);
+        return;
+      }
+      if (keys[0] === 'tags') {
+        await this.discovery.setTopics(filters.tags);
+        return;
+      }
+      if (keys[0] === 'status') {
+        await this.discovery.setStatusFilter(filters.status);
+        return;
+      }
+    }
+
+    if (filters.query !== undefined) this.discovery.filters.query = filters.query;
+    if (filters.difficulty !== undefined) this.discovery.filters.difficulty = filters.difficulty;
+    if (filters.tags !== undefined) this.discovery.filters.tags = [...filters.tags];
+    if (filters.status !== undefined) this.discovery.filters.status = filters.status;
+    this.discovery.skip = 0;
+    await this.discovery.persistFilters();
+    await this.discovery.refreshCatalog();
+  }
+
+  async _reportActionError(error, fallbackMessage) {
+    const code = error?.code || 'ERROR';
+    const message = error instanceof LcError ? error.message : fallbackMessage;
+    this.notice = { kind: 'error', code, message };
+    await this.refresh();
+    if (this.onError) {
+      try {
+        await this.onError(error);
+      } catch {
+        // Ignore error reporter failures
+      }
+    }
+    return { ok: false, code, message };
+  }
+
   async handleMessage(raw) {
     if (this.disposed || !this.panel) {
       return { ok: false, code: 'DISPOSED', message: 'Dashboard is not active.' };
@@ -496,37 +792,147 @@ class LeetCodeDashboard {
       return validated;
     }
 
-    if (validated.action === 'ready') {
-      await this.refresh();
-      return { ok: true, action: 'ready' };
-    }
-
-    if (validated.action === 'navigate') {
-      this.destination = validated.payload.destination;
-      this.notice = null;
-      await this.refresh();
-      return { ok: true, action: 'navigate', destination: this.destination };
-    }
-
-    if (validated.action === 'dismissNotice') {
-      this.notice = null;
-      await this.refresh();
-      return { ok: true, action: 'dismissNotice' };
-    }
-
-    if (validated.action === 'refresh') {
-      const target = validated.payload.target;
-      if (this.discovery) {
-        if (target === 'daily') {
-          await this.discovery.refreshDaily();
-        } else if (target === 'catalog') {
-          await this.discovery.refreshCatalog();
-        } else if (target === 'all') {
-          await this.discovery.refreshAll();
-        }
+    try {
+      if (validated.action === 'ready') {
+        await this.refresh();
+        return { ok: true, action: 'ready' };
       }
-      await this.refresh();
-      return { ok: true, action: 'refresh', target };
+
+      if (validated.action === 'navigate') {
+        this.destination = validated.payload.destination;
+        this.notice = null;
+        await this.refresh();
+        return { ok: true, action: 'navigate', destination: this.destination };
+      }
+
+      if (validated.action === 'dismissNotice') {
+        this.notice = null;
+        await this.refresh();
+        return { ok: true, action: 'dismissNotice' };
+      }
+
+      if (validated.action === 'refresh') {
+        const target = validated.payload.target;
+        this.notice = null;
+        if (this.discovery) {
+          if (target === 'daily') {
+            await this.discovery.refreshDaily();
+          } else if (target === 'catalog') {
+            await this.discovery.refreshCatalog();
+          } else if (target === 'topics') {
+            await this.discovery.ensureTopics(true);
+          } else if (target === 'all') {
+            await this.discovery.refreshAll();
+          }
+        }
+        await this.refresh();
+        return { ok: true, action: 'refresh', target };
+      }
+
+      if (validated.action === 'openProblem') {
+        const { titleSlug } = validated.payload;
+        if (typeof this.openProblemBySlug !== 'function') {
+          throw new LcError('UNSUPPORTED', 'Problem opening is not configured.');
+        }
+        const dailyQ = this.discovery?.daily?.data?.question;
+        const preview = (dailyQ && dailyQ.titleSlug === titleSlug)
+          ? dailyQ
+          : this.discovery?.catalog?.questions?.find(q => q.titleSlug === titleSlug);
+        this.notice = null;
+        await this.openProblemBySlug(titleSlug, preview);
+        await this.refresh();
+        return { ok: true, action: 'openProblem', titleSlug };
+      }
+
+      if (validated.action === 'openLocal') {
+        const { titleSlug } = validated.payload;
+        if (typeof this.openLocalProblem !== 'function') {
+          throw new LcError('UNSUPPORTED', 'Local problem opening is not configured.');
+        }
+        const locals = await this.getLocalProblems();
+        const found = Array.isArray(locals) ? locals.find(q => q.titleSlug === titleSlug) : undefined;
+        if (!found) {
+          throw new LcError('NOT_FOUND', 'Saved local problem was not found.');
+        }
+        this.notice = null;
+        await this.openLocalProblem(found);
+        await this.refresh();
+        return { ok: true, action: 'openLocal', titleSlug };
+      }
+
+      if (validated.action === 'setFilters') {
+        this.notice = null;
+        await this._applyFiltersToDiscovery(validated.payload.filters);
+        await this.refresh();
+        return { ok: true, action: 'setFilters', filters: { ...this.discovery?.filters } };
+      }
+
+      if (validated.action === 'toggleTopic') {
+        const { tag } = validated.payload;
+        this.notice = null;
+        if (this.discovery) {
+          const current = Array.isArray(this.discovery.filters.tags) ? this.discovery.filters.tags : [];
+          const next = current.includes(tag)
+            ? current.filter(t => t !== tag)
+            : [...current, tag];
+          await this.discovery.setTopics(next);
+        }
+        await this.refresh();
+        return { ok: true, action: 'toggleTopic', tag };
+      }
+
+      if (validated.action === 'removeFilter') {
+        const { kind, value } = validated.payload;
+        this.notice = null;
+        if (this.discovery) {
+          if (kind === 'query') {
+            await this.discovery.setSearchQuery('');
+          } else if (kind === 'difficulty') {
+            await this.discovery.setDifficulty('ANY');
+          } else if (kind === 'status') {
+            await this.discovery.setStatusFilter('ALL');
+          } else if (kind === 'tag') {
+            const next = (this.discovery.filters.tags || []).filter(t => t !== value);
+            await this.discovery.setTopics(next);
+          }
+        }
+        await this.refresh();
+        return { ok: true, action: 'removeFilter', kind };
+      }
+
+      if (validated.action === 'clearFilters') {
+        this.notice = null;
+        if (this.discovery) {
+          await this.discovery.clearFilters();
+        }
+        await this.refresh();
+        return { ok: true, action: 'clearFilters' };
+      }
+
+      if (validated.action === 'loadTopics') {
+        this.notice = null;
+        if (this.discovery) {
+          await this.discovery.ensureTopics(Boolean(validated.payload.force));
+        }
+        await this.refresh();
+        return { ok: true, action: 'loadTopics' };
+      }
+
+      if (validated.action === 'changePage') {
+        const { direction } = validated.payload;
+        this.notice = null;
+        if (this.discovery) {
+          if (direction === 'next') {
+            await this.discovery.nextPage();
+          } else {
+            await this.discovery.prevPage();
+          }
+        }
+        await this.refresh();
+        return { ok: true, action: 'changePage', direction, skip: this.discovery?.skip || 0 };
+      }
+    } catch (error) {
+      return this._reportActionError(error, 'The dashboard action could not be completed.');
     }
 
     return { ok: false, code: 'INVALID_MESSAGE', message: 'Unhandled dashboard action.' };
@@ -551,11 +957,15 @@ class LeetCodeDashboard {
       : 'No problem selected';
     const currentFile = current
       ? (current.fileName || 'Registered C++ solution')
-      : 'Select a problem via the LeetCode sidebar or Open Problem command (dashboard selection wiring in G2/G3).';
+      : 'Open a problem from Explore or My Problems below to select a C++ solution.';
 
     const noticeHtml = state.notice?.message
       ? `<div id="lc-notice-region"><div class="lc-notice${state.notice.kind === 'error' ? ' lc-notice-error' : state.notice.kind === 'warning' ? ' lc-notice-warning' : ''}" role="${state.notice.kind === 'error' ? 'alert' : 'status'}"><span>${escape(state.notice.message)}</span><button type="button" class="lc-btn lc-btn-secondary" data-action="dismissNotice">Dismiss</button></div></div>`
       : '<div id="lc-notice-region" hidden></div>';
+
+    const diff = state.catalog.filters.difficulty || 'ANY';
+    const statusVal = state.account.isVerified ? (state.catalog.filters.status || 'ALL') : 'ALL';
+    const selectedTopicCount = Array.isArray(state.catalog.filters.tags) ? state.catalog.filters.tags.length : 0;
 
     return `<!doctype html>
 <html lang="en">
@@ -571,7 +981,7 @@ class LeetCodeDashboard {
     <header class="lc-header">
       <div class="lc-title-group">
         <h1 class="lc-title">LeetCode Dashboard</h1>
-        <p class="lc-subtitle">Unified C++ practice shell (G1 shell · G2–G4 interactive actions labeled below)</p>
+        <p class="lc-subtitle">Unified C++ problem discovery and local solutions</p>
       </div>
       <div class="lc-action-row">
         <span id="lc-account-summary-pill" class="lc-account-pill" aria-label="Account connection state">${escape(state.account.summary)}</span>
@@ -603,7 +1013,7 @@ class LeetCodeDashboard {
           </div>
         </details>
       </div>
-      <p class="lc-muted">G1 Shell Note: Solution execution and editor actions are scheduled for G3. Use the editor title buttons, CodeLens, or sidebar in G1.</p>
+      <p class="lc-muted">Solution execution and editor actions are scheduled for G3. Use the editor title buttons, CodeLens, or sidebar until G3 is completed.</p>
     </section>
 
     ${noticeHtml}
@@ -629,15 +1039,50 @@ class LeetCodeDashboard {
             <h2 class="lc-card-title">Browse Problems</h2>
             <button type="button" class="lc-btn lc-btn-secondary" data-action="refresh" data-target="catalog">Refresh Problem List</button>
           </div>
-          <p id="lc-filter-summary" class="lc-muted">Active summary: ${escape(state.catalog.filterSummary)}</p>
-          <div class="lc-badge-row">
-            <span class="lc-badge">Search: ${escape(state.catalog.filters.query || 'Any')}</span>
-            <span class="lc-badge">Difficulty: ${escape(state.catalog.filters.difficulty)}</span>
-            <span class="lc-badge">Topics: ${escape(state.catalog.filters.tags.length ? state.catalog.filters.tags.join(', ') : 'Any')}</span>
-            <span class="lc-badge">Progress: ${escape(state.account.isVerified ? state.catalog.filters.status : 'Verify session to filter')}</span>
+
+          <div class="lc-filter-bar">
+            <div class="lc-filter-group lc-search-group">
+              <label for="lc-search-input" class="lc-label">Search by Title or Number</label>
+              <div class="lc-input-row">
+                <input id="lc-search-input" class="lc-input" type="search" maxlength="100" placeholder="e.g. 1, two sum, binary tree…" value="${escape(state.catalog.filters.query)}">
+                <button type="button" id="lc-search-btn" class="lc-btn" data-action="submitSearch">Search</button>
+              </div>
+            </div>
+
+            <div class="lc-filter-group">
+              <label for="lc-difficulty-select" class="lc-label">Difficulty</label>
+              <select id="lc-difficulty-select" class="lc-select" data-filter-select="difficulty" aria-label="Filter by Difficulty">
+                <option value="ANY"${diff === 'ANY' ? ' selected' : ''}>Any Difficulty</option>
+                <option value="EASY"${diff === 'EASY' ? ' selected' : ''}>Easy</option>
+                <option value="MEDIUM"${diff === 'MEDIUM' ? ' selected' : ''}>Medium</option>
+                <option value="HARD"${diff === 'HARD' ? ' selected' : ''}>Hard</option>
+              </select>
+            </div>
+
+            <div class="lc-filter-group">
+              <label for="lc-status-select" class="lc-label">Account Progress</label>
+              <select id="lc-status-select" class="lc-select" data-filter-select="status" aria-label="Filter by Account Progress"${state.account.isVerified ? '' : ' disabled'} title="${state.account.isVerified ? 'Filter by verified LeetCode progress' : 'Verify your LeetCode session in Account to filter by progress'}">
+                <option value="ALL"${statusVal === 'ALL' ? ' selected' : ''}>${state.account.isVerified ? 'All Progress' : 'Verify session to filter'}</option>
+                <option value="AC"${statusVal === 'AC' ? ' selected' : ''}>Solved</option>
+                <option value="TRIED"${statusVal === 'TRIED' ? ' selected' : ''}>Attempted</option>
+                <option value="NOT_STARTED"${statusVal === 'NOT_STARTED' ? ' selected' : ''}>Not started</option>
+              </select>
+            </div>
           </div>
-          <p class="lc-muted">Interactive search, difficulty/topic/progress filter controls, pagination, and click-to-open are scheduled for G2 (currently synced with the LeetCode sidebar).</p>
+
+          <div class="lc-filter-group">
+            <div class="lc-card-header">
+              <span id="lc-topics-label" class="lc-label">Topics (${selectedTopicCount} selected)</span>
+              <button type="button" class="lc-btn lc-btn-secondary" data-action="loadTopics">Load Topic Options</button>
+            </div>
+            <div id="lc-topics-body">${renderTopicsHtml(state.topics, state.catalog)}</div>
+          </div>
+
+          <p id="lc-filter-summary" class="lc-muted">Active summary: ${escape(state.catalog.filterSummary)}</p>
+          <div id="lc-active-filters" class="lc-badge-row" aria-label="Active Filters">${renderActiveFiltersHtml(state.catalog, state.account)}</div>
+
           <div id="lc-catalog-body">${renderCatalogHtml(state.catalog, state.account)}</div>
+          <div id="lc-pagination-bar" class="lc-pagination">${renderPaginationHtml(state.catalog)}</div>
         </article>
       </section>
 
@@ -665,7 +1110,7 @@ class LeetCodeDashboard {
             <button type="button" class="lc-btn lc-btn-secondary" disabled title="Planned in G4: Advanced: Import Session via native masked input dialogs.">Advanced: Import Session (G4)</button>
             <button type="button" class="lc-btn lc-btn-secondary" disabled title="Planned in G4: Disconnect Account from VS Code.">Disconnect Account (G4)</button>
           </div>
-          <p class="lc-muted">G1 Shell Note: Account actions in the dashboard are scheduled for G4. Credentials are never collected in HTML; use the LeetCode sidebar Account section in G1.</p>
+          <p class="lc-muted">Account actions in the dashboard are scheduled for G4. Credentials are never collected in HTML; use the LeetCode sidebar Account section until G4 is completed.</p>
         </article>
       </section>
     </main>

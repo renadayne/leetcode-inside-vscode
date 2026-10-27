@@ -43,6 +43,9 @@ async function createController(vscode, context, dependencies = {}) {
   dashboard = dependencies.dashboard || new LeetCodeDashboard(vscode, context, {
     discovery,
     mediaRoot,
+    openProblemBySlug: (slug, preview) => openProblemBySlug(slug, preview),
+    openLocalProblem: problem => openLocalProblemItem(problem),
+    onError: error => report(error),
     getLocalProblems: async () => {
       registered = await store.problems();
       return registered;
@@ -131,6 +134,9 @@ async function createController(vscode, context, dependencies = {}) {
       setStatus(user);
       if (discovery.initialized) {
         await discovery.refreshAll();
+      }
+      if (dashboard && dashboard.isOpen) {
+        await dashboard.refresh();
       }
       return { auth, user };
     } catch (error) {
@@ -307,6 +313,9 @@ async function createController(vscode, context, dependencies = {}) {
       setStatus(user);
       if (discovery.initialized) {
         await discovery.refreshAll();
+      }
+      if (dashboard && dashboard.isOpen) {
+        await dashboard.refresh();
       }
       await vscode.window.showInformationMessage(`Connected to LeetCode as ${user}.`);
     } finally {
@@ -545,6 +554,9 @@ async function createController(vscode, context, dependencies = {}) {
     setStatus('Disconnected');
     if (discovery.initialized) {
       await discovery.refreshAll();
+    }
+    if (dashboard && dashboard.isOpen) {
+      await dashboard.refresh();
     }
     await vscode.window.showInformationMessage('LeetCode session removed from VS Code. Pending operations and local code are preserved.');
   });

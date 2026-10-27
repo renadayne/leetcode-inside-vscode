@@ -725,8 +725,8 @@ test('G1: dashboard enforces strict CSP, loads bundled assets, escapes untrusted
   assert.ok(!serializedMessages.includes('secret-csrf-value-888'));
   assert.equal('auth' in f.controller.dashboard.lastState.account,false);
 
-  // Honest G1 labels for G2-G4 actions are present.
-  assert.match(html,/Open \(Planned in G2\)/);
+  // Active G2 actions and honest G3-G4 planned labels are present.
+  assert.match(html,/Open Daily Challenge/);
   assert.match(html,/Run Examples \(G3\)/);
   assert.match(html,/Advanced: Import Session \(G4\)/);
 });
@@ -774,11 +774,11 @@ test('G1: dashboard message bridge validates allowlisted actions, surfaces loadi
     assert.equal(f.controller.dashboard.lastState.destination,dest);
   }
 
-  // Valid-shaped G2-G4 actions return honest UNIMPLEMENTED status and set a dismissible notice.
-  const [unimpl]=await panel.emitMessage({action:'openProblem',titleSlug:'two-sum'});
+  // Valid-shaped G3-G4 actions return honest UNIMPLEMENTED status and set a dismissible notice.
+  const [unimpl]=await panel.emitMessage({action:'problemAction',kind:'run'});
   assert.equal(unimpl.ok,false);
   assert.equal(unimpl.code,'UNIMPLEMENTED');
-  assert.match(f.controller.dashboard.lastState.notice.message,/not yet implemented in G1/);
+  assert.match(f.controller.dashboard.lastState.notice.message,/scheduled for a later OpenGUI task \(G3–G4\)/);
 
   const [dismissRes]=await panel.emitMessage({action:'dismissNotice'});
   assert.equal(dismissRes.ok,true);
@@ -799,9 +799,17 @@ test('G1: dashboard message bridge validates allowlisted actions, surfaces loadi
     {action:' navigate',destination:'explore',path:'../secret'},
     {action:'refresh',target:'invalidTarget'},
     {action:'openProblem',titleSlug:'../../etc/passwd'},
+    {action:'openLocal',titleSlug:'../secret'},
+    {action:'toggleTopic',tag:'INVALID_SLUG'},
+    {action:'removeFilter',kind:'tag',value:'../../bad'},
+    {action:'removeFilter',kind:'unknownKind'},
+    {action:'changePage',direction:'sideways'},
     {action:'problemAction',kind:'arbitraryShell'},
     {action:'accountAction',kind:'stealCookies'},
-    {action:'setFilters',filters:{query:'ok',session:'leaked'}}
+    {action:'setFilters',filters:{query:'ok',session:'leaked'}},
+    {action:'setFilters',filters:{difficulty:'IMPOSSIBLE'}},
+    {action:'setFilters',filters:{status:'INVALID_STATUS'}},
+    {action:'setFilters',filters:{tags:['valid-slug','../bad']}}
   ];
 
   const rejectedBefore=f.controller.dashboard.rejectedCount;
@@ -813,5 +821,207 @@ test('G1: dashboard message bridge validates allowlisted actions, surfaces loadi
   }
   assert.equal(f.controller.dashboard.rejectedCount,rejectedBefore+invalidPayloads.length);
 });
+
+test('G2: dashboard opens Daily, catalog, and local problems via shared flows, preserves files offline, and blocks unsupported/premium problems cleanly', async t=>{
+  let problemFetches=0;
+  const q3={
+    questionId:'303',
+    questionFrontendId:'3',
+    title:'Longest Substring',
+    titleSlug:'longest-substring',
+    difficulty:'Medium',
+    isPaidOnly:false,
+    status:null,
+    topicTags:[{name:'Hash Table',slug:'hash-table'}],
+    content:'<p>Substring problem</p>',
+    codeSnippets:[{langSlug:'cpp',code:'class Solution { /* starter 3 */ };'}],
+    exampleTestcases:'"abcabcbb"',
+    enableRunCode:true
+  };
+  const qPremium={
+    ...q,
+    questionId:'202',
+    questionFrontendId:'2',
+    title:'Paid Problem',
+    titleSlug:'paid-problem',
+    isPaidOnly:true
+  };
+  const qUnsupported={
+    ...q,
+    questionId:'999',
+    questionFrontendId:'LCP 01',
+    title:'Guess Numbers',
+    titleSlug:'guess-numbers'
+  };
+
+  const f=await fixture(t,async(_p,o)=>{
+    const {query,variables}=o.body;
+    if(query.includes('activeDailyCodingChallengeQuestion')){
+      return {data:{activeDailyCodingChallengeQuestion:{date:'2026-10-27',link:'/problems/longest-substring/',question:q3}}};
+    }
+    if(query.includes('problemsetQuestionList')){
+      return {data:{problemsetQuestionList:{total:3,questions:[q3,qPremium,qUnsupported]}}};
+    }
+    if(query.includes('questionData')){
+      problemFetches++;
+      if(variables.titleSlug==='paid-problem'){
+        return {data:{question:{...qPremium,content:null,codeSnippets:null}}};
+      }
+      if(variables.titleSlug==='longest-substring'){
+        return {data:{question:q3}};
+      }
+    }
+    throw new Error('unexpected query');
+  },{initialSecrets:[]});
+
+  const panel=await f.handlers.get('lc.openGUI')();
+  await f.controller.discovery.refreshAll();
+  await f.controller.dashboard.refresh();
+  assert.equal(panel.htmlWriteCount,1);
+
+  // Anonymous click-to-open on Daily Challenge opens problem in editor and updates localProblems/currentProblem.
+  const [openDailyRes]=await panel.emitMessage({action:'openProblem',titleSlug:'longest-substring'});
+  assert.deepEqual(openDailyRes,{ok:true,action:'openProblem',titleSlug:'longest-substring'});
+  assert.equal(problemFetches,1);
+  assert.equal(f.controller.dashboard.lastState.currentProblem.titleSlug,'longest-substring');
+  assert.ok(f.controller.dashboard.lastState.localProblems.some(p=>p.titleSlug==='longest-substring'));
+  assert.equal(panel.htmlWriteCount,1);
+
+  // Unsupported non-numeric problem is rejected before making any network fetch.
+  const fetchesBeforeUnsupported=problemFetches;
+  const [unsupportedRes]=await panel.emitMessage({action:'openProblem',titleSlug:'guess-numbers'});
+  assert.equal(unsupportedRes.ok,false);
+  assert.equal(unsupportedRes.code,'UNSUPPORTED');
+  assert.equal(problemFetches,fetchesBeforeUnsupported);
+  assert.match(f.controller.dashboard.lastState.notice.message,/not a supported numbered C\+\+ problem/);
+
+  // Premium problem surfaces access restriction and preserves existing solution files.
+  await fs.writeFile(f.file,'// preserved two-sum solution');
+  const [premiumRes]=await panel.emitMessage({action:'openProblem',titleSlug:'paid-problem'});
+  assert.equal(premiumRes.ok,false);
+  assert.equal(premiumRes.code,'ACCESS');
+  assert.match(f.controller.dashboard.lastState.notice.message,/requires a LeetCode account with access/i);
+  assert.equal(await fs.readFile(f.file,'utf8'),'// preserved two-sum solution');
+
+  // Offline local reopening via 'openLocal' makes zero network calls and preserves existing C++ code.
+  const fetchesBeforeLocal=problemFetches;
+  const [openLocalRes]=await panel.emitMessage({action:'openLocal',titleSlug:'two-sum'});
+  assert.deepEqual(openLocalRes,{ok:true,action:'openLocal',titleSlug:'two-sum'});
+  assert.equal(problemFetches,fetchesBeforeLocal);
+  assert.equal(await fs.readFile(f.file,'utf8'),'// preserved two-sum solution');
+  assert.equal(f.controller.dashboard.lastState.currentProblem.titleSlug,'two-sum');
+  assert.equal(panel.htmlWriteCount,1);
+});
+
+test('G2: dashboard search, difficulty, multi-topic, progress filters, removable chips, reset, and pagination stay synchronized with sidebar and guard stale responses', async t=>{
+  const catalogVariables=[];
+  let failDaily=false;
+  let resolveDelayedCatalog;
+  let delayNextCatalog=false;
+
+  const f=await fixture(t,async(_p,o)=>{
+    const {query,variables}=o.body;
+    if(query.includes('userStatus'))return {data:{userStatus:{isSignedIn:true,username:'alice'}}};
+    if(query.includes('activeDailyCodingChallengeQuestion')){
+      if(failDaily)throw new LcError('NETWORK','Daily refresh timed out.');
+      return {data:{activeDailyCodingChallengeQuestion:{date:'2026-10-25',link:'/problems/two-sum/',question:{...q,status:'ac'}}}};
+    }
+    if(query.includes('questionTopicTags')){
+      return {data:{questionTopicTags:{edges:[
+        {node:{name:'Array',slug:'array'}},
+        {node:{name:'Hash Table',slug:'hash-table'}},
+        {node:{name:'Binary Search',slug:'binary-search'}}
+      ]}}};
+    }
+    if(query.includes('problemsetQuestionList')){
+      catalogVariables.push(variables);
+      if(delayNextCatalog){
+        delayNextCatalog=false;
+        await new Promise(r=>{resolveDelayedCatalog=r;});
+        return {data:{problemsetQuestionList:{total:1,questions:[{...q,title:'Stale Delayed Result',titleSlug:'stale-result'}]}}};
+      }
+      return {data:{problemsetQuestionList:{
+        total:120,
+        questions:Array.from({length:50},(_,i)=>({
+          ...q,
+          questionId:String(variables.skip+i+1),
+          questionFrontendId:String(variables.skip+i+1),
+          title:`Filtered Problem ${variables.skip+i+1}`,
+          titleSlug:`filtered-problem-${variables.skip+i+1}`,
+          difficulty:variables.filters?.difficulty==='HARD'?'Hard':'Easy',
+          status:i===0?'ac':null
+        }))
+      }}};
+    }
+    throw new Error('unexpected query');
+  });
+
+  const panel=await f.handlers.get('lc.openGUI')();
+  await f.controller.discovery.refreshAll();
+  await f.controller.dashboard.refresh();
+
+  // While unverified, setting a progress filter from dashboard is rejected with AUTH.
+  const [unverifiedStatus]=await panel.emitMessage({action:'setFilters',filters:{status:'AC'}});
+  assert.equal(unverifiedStatus.ok,false);
+  assert.equal(unverifiedStatus.code,'AUTH');
+
+  // Verify account and confirm both sidebar and dashboard see verified progress.
+  await f.handlers.get('lc.account')();
+  assert.equal(f.controller.dashboard.lastState.account.isVerified,true);
+  assert.equal(f.controller.dashboard.lastState.daily.question.progress,'Solved');
+
+  // Load topics via dashboard action and toggle multi-topic selection.
+  const [topicsRes]=await panel.emitMessage({action:'loadTopics'});
+  assert.equal(topicsRes.ok,true);
+  assert.equal(f.controller.dashboard.lastState.topics.items.length,3);
+
+  await panel.emitMessage({action:'toggleTopic',tag:'array'});
+  await panel.emitMessage({action:'toggleTopic',tag:'hash-table'});
+  assert.deepEqual(f.controller.discovery.filters.tags,['array','hash-table']);
+  assert.deepEqual(f.controller.dashboard.lastState.catalog.filters.tags,['array','hash-table']);
+
+  // Advance pagination to page 2 (skip=50) and verify sidebar Browse section agrees.
+  const [nextPageRes]=await panel.emitMessage({action:'changePage',direction:'next'});
+  assert.equal(nextPageRes.ok,true);
+  assert.equal(f.controller.discovery.skip,50);
+  assert.equal(f.controller.dashboard.lastState.catalog.skip,50);
+  const sidebarSections=await f.controller.explorer.getChildren();
+  assert.match(sidebarSections[2].description,/51–100 of 120/);
+
+  // Applying search query resets pagination skip to 0 and syncs sidebar + dashboard.
+  await panel.emitMessage({action:'setFilters',filters:{query:'  binary tree  '}});
+  assert.equal(f.controller.discovery.skip,0);
+  assert.equal(f.controller.discovery.filters.query,'binary tree');
+  assert.equal(catalogVariables.at(-1).filters.searchKeywords,'binary tree');
+
+  // Removable filter chips remove individual filters cleanly.
+  await panel.emitMessage({action:'removeFilter',kind:'tag',value:'array'});
+  assert.deepEqual(f.controller.discovery.filters.tags,['hash-table']);
+  await panel.emitMessage({action:'removeFilter',kind:'query'});
+  assert.equal(f.controller.discovery.filters.query,'');
+
+  // Stale out-of-order catalog response cannot overwrite newer difficulty filter selection.
+  delayNextCatalog=true;
+  const stalePromise=panel.emitMessage({action:'setFilters',filters:{difficulty:'EASY'}});
+  const freshPromise=panel.emitMessage({action:'setFilters',filters:{difficulty:'HARD'}});
+  await freshPromise;
+  resolveDelayedCatalog();
+  await stalePromise;
+  assert.equal(f.controller.dashboard.lastState.catalog.filters.difficulty,'HARD');
+  assert.equal(f.controller.dashboard.lastState.catalog.questions[0].difficulty,'Hard');
+
+  // Clear filters resets all filters to defaults.
+  await panel.emitMessage({action:'clearFilters'});
+  assert.deepEqual(f.controller.dashboard.lastState.catalog.filters,{query:'',difficulty:'ANY',tags:[],status:'ALL'});
+
+  // Daily refresh failure retains server date and marks stale explicitly in dashboard state.
+  failDaily=true;
+  await panel.emitMessage({action:'refresh',target:'daily'});
+  assert.equal(f.controller.dashboard.lastState.daily.date,'2026-10-25');
+  assert.equal(f.controller.dashboard.lastState.daily.stale,true);
+  assert.match(f.controller.dashboard.lastState.daily.error,/Daily refresh timed out/);
+  assert.equal(panel.htmlWriteCount,1);
+});
+
 
 
