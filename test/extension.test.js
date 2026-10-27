@@ -6,17 +6,25 @@ const os = require('node:os');
 const path = require('node:path');
 const {createController} = require('../src/extension');
 const {Store} = require('../src/store');
-const {LeetCodeClient} = require('../src/api');
+const {LeetCodeClient, LcError} = require('../src/api');
 
-const q={questionId:'101',questionFrontendId:'1',title:'Two Sum',titleSlug:'two-sum',difficulty:'Easy',content:'<p>Problem</p>',starter:'class Solution {};',exampleTestcases:'[2,7]\n9',enableRunCode:true};
+const q={questionId:'101',questionFrontendId:'1',title:'Two Sum',titleSlug:'two-sum',difficulty:'Easy',isPaidOnly:false,status:null,topicTags:[{name:'Array',slug:'array'}],content:'<p>Problem</p>',starter:'class Solution {};',exampleTestcases:'[2,7]\n9',enableRunCode:true};
 const disposable=()=>({dispose(){}});
 function fakeVSCode() {
   const handlers=new Map();
-  const errors=[], logs=[], infos=[], inputs=[], picks=[], panels=[];
+  const errors=[], logs=[], infos=[], inputs=[], picks=[], panels=[], treeProviders=new Map();
   const documents=[];
   const Uri={file:file=>({scheme:'file',fsPath:file,toString:()=>`file://${file}`}),parse:value=>({toString:()=>value})};
   const vscode={Uri,StatusBarAlignment:{Left:1},ViewColumn:{One:1,Beside:-2},ProgressLocation:{Notification:15},
-    EventEmitter:class {event=()=>disposable();fire(){}dispose(){}},
+    TreeItemCollapsibleState:{None:0,Collapsed:1,Expanded:2},
+    TreeItem:class {constructor(label,collapsibleState){this.label=label;this.collapsibleState=collapsibleState;}},
+    ThemeIcon:class {constructor(id){this.id=id;}},
+    EventEmitter:class {
+      constructor(){this.listeners=[];}
+      event=fn=>{this.listeners.push(fn);return disposable();};
+      fire(v){for(const fn of this.listeners)fn(v);}
+      dispose(){this.listeners=[];}
+    },
     CodeLens:class {constructor(range,command){Object.assign(this,{range,command});}},Range:class {},
     commands:{
       registerCommand(id,fn){handlers.set(id,fn);return disposable();},
@@ -31,11 +39,18 @@ function fakeVSCode() {
       createOutputChannel(){return {appendLine:s=>logs.push(s),show(){},clear(){logs.length=0;},dispose(){}};},
       createStatusBarItem(){return {show(){},dispose(){}};},
       onDidChangeActiveTextEditor(){return disposable();},
+      registerTreeDataProvider(id,provider){treeProviders.set(id,provider);return disposable();},
       async showErrorMessage(s){errors.push(s);},
       async showInformationMessage(s,...rest){infos.push(s);return rest.length?undefined:undefined;},
       async showWarningMessage(){return undefined;},
       async showInputBox(){return inputs.shift();},
-      async showQuickPick(items){const pick=picks.shift();return pick===undefined?undefined:items[pick];},
+      async showQuickPick(items,opts){
+        const pick=picks.shift();
+        if(pick===undefined)return undefined;
+        if(typeof pick==='function')return pick(items,opts);
+        if(Array.isArray(pick))return pick.map(i=>items[i]);
+        return items[pick];
+      },
       async withProgress(_,fn){return fn({report(){}},{isCancellationRequested:false});},
       createWebviewPanel(_,title,col){const p={title,viewColumn:col,webview:{html:''},onDidDispose(){return disposable();},reveal(){},dispose(){}};panels.push(p);return p;},
       async showTextDocument(document,opts={}){const e={document,viewColumn:opts.viewColumn===-2?2:opts.viewColumn||2};this.activeTextEditor=e;this.visibleTextEditors=[e];return e;}
@@ -43,22 +58,34 @@ function fakeVSCode() {
     languages:{registerCodeLensProvider(_,provider){vscode.provider=provider;return disposable();}},
     env:{async openExternal(){return true;}}
   };
-  return {vscode,handlers,errors,logs,infos,inputs,picks,panels};
+  return {vscode,handlers,errors,logs,infos,inputs,picks,panels,treeProviders};
 }
-async function fixture(t,transport) {
+async function fixture(t,transport,options={}) {
   const dir=await fs.mkdtemp(path.join(os.tmpdir(),'lc-extension-'));
   t.after(()=>fs.rm(dir,{recursive:true,force:true}));
   const store=new Store(path.join(dir,'solutions'));await store.init();
   const file=await store.cache(q);
   const ui=fakeVSCode();
-  const secrets=new Map([['leetcode.session.v1',JSON.stringify({session:'fake-session-value',csrf:'fake-csrf-value'})]]);
-  const context={globalStorageUri:ui.vscode.Uri.file(dir),subscriptions:[],globalState:{async update(){}},secrets:{async get(k){return secrets.get(k);},async store(k,v){secrets.set(k,v);},async delete(k){secrets.delete(k);}}};
+  const secretListeners=[];
+  const secrets=new Map(options.initialSecrets!==undefined?options.initialSecrets:[['leetcode.session.v1',JSON.stringify({session:'fake-session-value',csrf:'fake-csrf-value'})]]);
+  const stateMap=new Map(options.initialState||[]);
+  const context={
+    globalStorageUri:ui.vscode.Uri.file(dir),
+    subscriptions:[],
+    globalState:{get(k){return stateMap.get(k);},async update(k,v){stateMap.set(k,v);}},
+    secrets:{
+      async get(k){return secrets.get(k);},
+      async store(k,v){secrets.set(k,v);for(const fn of secretListeners)await fn({key:k});},
+      async delete(k){secrets.delete(k);for(const fn of secretListeners)await fn({key:k});},
+      onDidChange(fn){secretListeners.push(fn);return disposable();}
+    }
+  };
   const api=new LeetCodeClient(transport || (async()=>{throw new Error('No network expected');}));
   const controller=await createController(ui.vscode,context,{store,api});
   t.after(()=>context.subscriptions.forEach(d=>d.dispose()));
   const doc=await ui.vscode.workspace.openTextDocument(ui.vscode.Uri.file(file));
   await ui.vscode.window.showTextDocument(doc);
-  return {...ui,context,secrets,controller,store,file,doc,dir};
+  return {...ui,context,secrets,stateMap,controller,store,file,doc,dir};
 }
 
 test('full command flow sends the selected dirty editor snapshot and receives remote-shaped verdict', async t=>{
@@ -138,4 +165,189 @@ test('connect stores credentials only after remote validation, disconnect remove
   assert.ok(!f.logs.join('\n').includes('new-session-value'));
   await f.handlers.get('lc.disconnect')();assert.equal(f.secrets.size,0);
   await f.handlers.get('lc.run')();assert.match(f.errors.at(-1),/Connect your LeetCode account first/);
+});
+
+test('sidebar makes no startup network calls, loads anonymously on first use, and ignores malformed stored secrets', async t=>{
+  const calls=[];
+  const f=await fixture(t,async(_p,o)=>{
+    calls.push(o);
+    const query=o.body.query;
+    if(query.includes('activeDailyCodingChallengeQuestion')){
+      return {data:{activeDailyCodingChallengeQuestion:{date:'2026-10-27',link:'/problems/two-sum/',question:{...q,status:'ac'}}}};
+    }
+    if(query.includes('problemsetQuestionList')){
+      return {data:{problemsetQuestionList:{total:2,questions:[
+        {...q,status:null},
+        {...q,questionId:'999',questionFrontendId:'LCP 01',title:'Guess Numbers',titleSlug:'guess-numbers',status:null}
+      ]}}};
+    }
+    throw new Error('unexpected query');
+  },{initialSecrets:[['leetcode.session.v1','{corrupted-json']]});
+
+  // Activation made zero network calls.
+  assert.equal(calls.length,0);
+  const explorer=f.treeProviders.get('lc.explorer');
+  assert.ok(explorer);
+
+  // First sidebar root expansion triggers anonymous discovery without failing on corrupted secrets.
+  const sections=await explorer.getChildren();
+  assert.deepEqual(sections.map(s=>s.label),['Account','Daily Challenge','Browse Problems','Local Problems']);
+  await f.controller.discovery.refreshAll();
+  assert.ok(calls.every(c=>c.auth===undefined));
+
+  const dailyRows=await explorer.getChildren(sections[1]);
+  assert.equal(dailyRows[0].label,'1. Two Sum');
+  // Unverified session must not show 'Solved' or 'Not started'.
+  assert.equal(dailyRows[0].description,'2026-10-27 · Easy');
+
+  const browseRows=await explorer.getChildren(sections[2]);
+  const problemRows=browseRows.filter(r=>r.kind==='problem');
+  assert.equal(problemRows.length,2);
+  assert.equal(problemRows[0].description,'Easy');
+  assert.equal(problemRows[1].label,'LCP 01. Guess Numbers');
+  assert.equal(problemRows[1].description,'Easy · Unsupported ID');
+
+  // Clicking unsupported nonnumeric entry surfaces explicit error without network calls.
+  const countBefore=calls.length;
+  await f.handlers.get('lc.openProblemItem')(problemRows[1]);
+  assert.equal(calls.length,countBefore);
+  assert.match(f.errors.at(-1),/not a supported numbered C\+\+ problem/);
+
+  // Local Problems section shows 'Available locally', never remote solved status, and reopens offline.
+  await fs.writeFile(f.file,'// local edits kept');
+  const localRows=await explorer.getChildren(sections[3]);
+  assert.equal(localRows[0].description,'Easy · Available locally');
+  await f.handlers.get('lc.openLocalProblem')(localRows[0]);
+  assert.equal(calls.length,countBefore);
+  assert.equal(await fs.readFile(f.file,'utf8'),'// local edits kept');
+});
+
+test('filters, pagination, filter reset, andverified progress display work through sidebar actions', async t=>{
+  const variablesLog=[];
+  const f=await fixture(t,async(_p,o)=>{
+    const {query,variables}=o.body;
+    if(query.includes('userStatus'))return {data:{userStatus:{isSignedIn:true,username:'alice'}}};
+    if(query.includes('activeDailyCodingChallengeQuestion')){
+      return {data:{activeDailyCodingChallengeQuestion:{date:'2026-10-27',link:'/problems/two-sum/',question:{...q,status:'ac'}}}};
+    }
+    if(query.includes('questionTopicTags')){
+      return {data:{questionTopicTags:{edges:[{node:{name:'Array',slug:'array'}},{node:{name:'Dynamic Programming',slug:'dynamic-programming'}}]}}};
+    }
+    if(query.includes('problemsetQuestionList')){
+      variablesLog.push(variables);
+      return {data:{problemsetQuestionList:{
+        total:120,
+        questions:Array.from({length:50},(_,i)=>({
+          ...q,
+          questionId:String(variables.skip+i+1),
+          questionFrontendId:String(variables.skip+i+1),
+          title:`Problem ${variables.skip+i+1}`,
+          titleSlug:`problem-${variables.skip+i+1}`,
+          status:i===0?'ac':i===1?'notac':null
+        }))
+      }}};
+    }
+    throw new Error('unexpected query');
+  });
+
+  // Verify account first so progress badges and filters are enabled.
+  await f.handlers.get('lc.account')();
+  assert.equal(f.controller.discovery.isVerified,true);
+
+  await f.handlers.get('lc.refreshCatalog')();
+  const browseSection=(await f.controller.explorer.getChildren())[2];
+  const initialRows=await f.controller.explorer.getChildren(browseSection);
+  const firstThree=initialRows.filter(r=>r.kind==='problem').slice(0,3);
+  assert.equal(firstThree[0].description,'Easy · Solved');
+  assert.equal(firstThree[1].description,'Easy · Attempted');
+  assert.equal(firstThree[2].description,'Easy · Not started');
+
+  // Pagination: advance to next page (skip=50).
+  await f.handlers.get('lc.nextPage')();
+  assert.equal(f.controller.discovery.skip,50);
+  assert.equal(variablesLog.at(-1).skip,50);
+
+  // Changing difficulty filter resets pagination skip to 0.
+  f.picks.push(2); // Medium
+  await f.handlers.get('lc.filterDifficulty')();
+  assert.equal(f.controller.discovery.skip,0);
+  assert.equal(variablesLog.at(-1).filters.difficulty,'MEDIUM');
+
+  // Multi-topic filter and search keyword filter.
+  f.picks.push([0,1]); // array, dynamic-programming
+  await f.handlers.get('lc.filterTopics')();
+  assert.deepEqual(variablesLog.at(-1).filters.tags,['array','dynamic-programming']);
+
+  f.inputs.push('  binary tree  ');
+  await f.handlers.get('lc.filterSearch')();
+  assert.equal(variablesLog.at(-1).filters.searchKeywords,'binary tree');
+
+  // Progress filter when verified.
+  f.picks.push(1); // Solved -> AC
+  await f.handlers.get('lc.filterStatus')();
+  assert.equal(variablesLog.at(-1).filters.status,'AC');
+
+  // Clear filters resets all filters and skip.
+  await f.handlers.get('lc.clearFilters')();
+  assert.deepEqual(variablesLog.at(-1),{limit:50,skip:0,filters:{}});
+});
+
+test('stale out-of-order catalog responses are discarded and cannot overwrite newer filter selection', async t=>{
+  let resolveFirst;
+  const firstGate=new Promise(r=>{resolveFirst=r;});
+  let callCount=0;
+  const f=await fixture(t,async(_p,o)=>{
+    const {variables}=o.body;
+    callCount++;
+    if(callCount===1){
+      await firstGate;
+      return {data:{problemsetQuestionList:{total:1,questions:[{...q,title:'Stale Easy Problem',titleSlug:'stale-easy'}]}}};
+    }
+    return {data:{problemsetQuestionList:{total:1,questions:[{...q,questionFrontendId:'2',title:`Fresh ${variables.filters.difficulty} Problem`,titleSlug:'fresh-hard',difficulty:'Hard'}]}}};
+  });
+
+  const p1=f.controller.discovery.setDifficulty('EASY');
+  const p2=f.controller.discovery.setDifficulty('HARD');
+  await p2;
+  resolveFirst();
+  await p1;
+
+  assert.equal(f.controller.discovery.filters.difficulty,'HARD');
+  assert.equal(f.controller.discovery.catalog.questions.length,1);
+  assert.equal(f.controller.discovery.catalog.questions[0].titleSlug,'fresh-hard');
+});
+
+test('Daily Challenge exposes server date, marks failed refreshes as stale without calling old challenge today, and opens problem without overwriting code', async t=>{
+  let failDaily=false;
+  const f=await fixture(t,async(_p,o)=>{
+    const {query}=o.body;
+    if(query.includes('activeDailyCodingChallengeQuestion')){
+      if(failDaily)throw new LcError('NETWORK','Cannot reach LeetCode.');
+      return {data:{activeDailyCodingChallengeQuestion:{date:'2026-10-25',link:'/problems/two-sum/',question:q}}};
+    }
+    if(query.includes('questionData')){
+      return {data:{question:{...q,codeSnippets:[{langSlug:'cpp',code:'class Solution { /* remote starter */ };'}]}}};
+    }
+    return {data:{problemsetQuestionList:{total:0,questions:[]}}};
+  });
+
+  await fs.writeFile(f.file,'// user solution preserved');
+  await f.handlers.get('lc.refreshDaily')();
+  const sections=await f.controller.explorer.getChildren();
+  assert.equal(sections[1].description,'2026-10-25');
+
+  // Subsequent refresh failure keeps dated challenge as explicitly stale + retry row.
+  failDaily=true;
+  await f.handlers.get('lc.refreshDaily')();
+  const updatedSections=await f.controller.explorer.getChildren();
+  assert.equal(updatedSections[1].description,'2026-10-25 (stale)');
+  const dailyChildren=await f.controller.explorer.getChildren(updatedSections[1]);
+  assert.equal(dailyChildren.length,2);
+  assert.match(dailyChildren[0].description,/2026-10-25 \(stale\)/);
+  assert.ok(!dailyChildren[0].description.toLowerCase().includes('today'));
+  assert.equal(dailyChildren[1].command.command,'lc.refreshDaily');
+
+  // Clicking the Daily problem row opens it via shared slug path without overwriting existing C++ file.
+  await f.handlers.get('lc.openProblemItem')(dailyChildren[0]);
+  assert.equal(await fs.readFile(f.file,'utf8'),'// user solution preserved');
 });

@@ -5,6 +5,8 @@ const { LeetCodeClient, LcError, credentials } = require('./api');
 const { Store } = require('./store');
 const { Jobs } = require('./jobs');
 const { description, formatResult } = require('./render');
+const { DiscoveryState } = require('./discovery');
+const { LeetCodeExplorer } = require('./explorer');
 const SECRET = 'leetcode.session.v1';
 
 async function createController(vscode, context, dependencies = {}) {
@@ -20,7 +22,21 @@ async function createController(vscode, context, dependencies = {}) {
   let registered = await store.problems();
   let disposed = false;
   let connecting = false;
-  let accountState = (await context.secrets.get(SECRET)) ? 'Session stored' : 'Disconnected';
+  let internalSecretWrite = false;
+  let explorer;
+
+  const discovery = dependencies.discovery || new DiscoveryState(api, context.globalState, () => {
+    if (!disposed && explorer) explorer.refresh();
+  });
+  explorer = dependencies.explorer || new LeetCodeExplorer(vscode, discovery, async () => {
+    registered = await store.problems();
+    return registered;
+  });
+
+  const initialSecret = await context.secrets.get(SECRET);
+  let accountState = initialSecret ? 'Session stored' : 'Disconnected';
+  discovery.setAccountState(initialSecret ? 'unverified' : 'signed_out');
+
   function setStatus(state) {
     accountState = state;
     status.text = `$(code) LeetCode: ${state}`;
@@ -39,33 +55,77 @@ async function createController(vscode, context, dependencies = {}) {
     if (required) throw new LcError('AUTH', 'Connect your LeetCode account first using LeetCode: Connect Account.');
     return undefined;
   }
-  async function verifiedAuth() {
-    const auth = await getAuth(true);
-    const user = await api.account(auth);
-    setStatus(user);
-    return { auth, user };
+
+  async function tryGetAuth() {
+    try { return await getAuth(false); }
+    catch { return undefined; }
   }
+
+  async function verifiedAuth() {
+    let auth;
+    try {
+      auth = await getAuth(true);
+    } catch (error) {
+      if (error.code === 'CREDENTIALS') {
+        discovery.setAccountState('expired', { detail: error.message });
+        setStatus('Reconnect needed');
+      } else {
+        discovery.setAccountState('signed_out');
+        setStatus('Disconnected');
+      }
+      throw error;
+    }
+    try {
+      const user = await api.account(auth);
+      discovery.setAccountState('verified', { username: user, auth });
+      setStatus(user);
+      if (discovery.initialized) {
+        await discovery.refreshAll();
+      }
+      return { auth, user };
+    } catch (error) {
+      if (error.code === 'AUTH' && !error.redirected) {
+        discovery.setAccountState('expired', { detail: error.message });
+        setStatus('Reconnect needed');
+      } else {
+        discovery.setAccountState('unavailable', { detail: error instanceof LcError ? error.message : 'Account verification unavailable.' });
+        setStatus('Verification unavailable');
+      }
+      throw error;
+    }
+  }
+
   async function report(error) {
     if (disposed) return;
     // Never expose arbitrary exception text: errors can include headers or tokens.
     const message = error instanceof LcError ? error.message : 'The operation failed locally. Check that the LeetCode solutions folder is accessible; your existing code has not been replaced.';
-    if (error.code === 'AUTH' || error.code === 'FORBIDDEN') setStatus('Reconnect needed');
+    if (error?.code === 'AUTH' && !error?.redirected) {
+      discovery.setAccountState('expired', { detail: message });
+      setStatus('Reconnect needed');
+    } else if (error?.code === 'FORBIDDEN' || error?.redirected) {
+      discovery.setAccountState('unavailable', { detail: message });
+      setStatus('Verification unavailable');
+    }
     output.appendLine(`\n${message}`);
     output.show(true);
     await vscode.window.showErrorMessage(message);
   }
+
   function command(id, action) {
     context.subscriptions.push(vscode.commands.registerCommand(id, (...args) => {
       try { return Promise.resolve(action(...args)).catch(report); }
       catch (e) { return report(e); }
     }));
   }
+
   function localUri(uri) {
     return uri?.scheme === 'file' && path.dirname(uri.fsPath) === store.root;
   }
+
   function isRegistered(uri) {
     return localUri(uri) && registered.some(q => store.file(q) === uri.fsPath);
   }
+
   function capture(uri) {
     const doc = uri && typeof uri.toString === 'function'
       ? vscode.workspace.textDocuments.find(d => d.uri.toString() === uri.toString())
@@ -76,13 +136,16 @@ async function createController(vscode, context, dependencies = {}) {
     if (Buffer.byteLength(code, 'utf8') > 1024 * 1024) throw new LcError('SIZE', 'The solution exceeds the 1 MiB limit.');
     return { file: doc.uri.fsPath, uri: doc.uri, code, version: doc.version, dirty: doc.isDirty };
   }
+
   async function selectedProblem() {
     const uri = vscode.window.activeTextEditor?.document.uri;
     if (isRegistered(uri)) return store.registered(uri.fsPath);
     if (current) return current;
     throw new LcError('SELECTION', 'Open a LeetCode problem first.');
   }
+
   function showDescription(q) {
+    const renderedQuestion = discovery.isVerified ? q : { ...q, status: null };
     if (!panel) {
       const editor = vscode.window.activeTextEditor;
       const activeColumn = editor?.viewColumn || vscode.ViewColumn.One;
@@ -94,8 +157,9 @@ async function createController(vscode, context, dependencies = {}) {
       panel.title = `${q.questionFrontendId}. ${q.title}`;
       panel.reveal(panel.viewColumn, true);
     }
-    panel.webview.html = description(q);
+    panel.webview.html = description(renderedQuestion);
   }
+
   async function displayProblem(q) {
     const file = store.file(q);
     await store.safe(file, true);
@@ -109,34 +173,110 @@ async function createController(vscode, context, dependencies = {}) {
     lenses.fire();
     await context.globalState.update('lastProblem', q.titleSlug);
   }
-  async function connect() {
+
+  async function openProblemBySlug(titleSlug, previewQuestion) {
+    if (previewQuestion && (previewQuestion.supported === false || (previewQuestion.questionFrontendId !== undefined && !/^\d+$/.test(String(previewQuestion.questionFrontendId))))) {
+      throw new LcError('UNSUPPORTED', 'This problem is not a supported numbered C++ problem.');
+    }
+    const auth = discovery.isVerified ? discovery.activeAuth : await tryGetAuth();
+    let q;
+    await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'LeetCode: Opening problem' }, async () => {
+      try {
+        q = await api.problem(titleSlug, auth);
+      } catch (error) {
+        if (auth && (error.code === 'AUTH' || error.code === 'FORBIDDEN')) {
+          discovery.handleAuthFailure(error);
+          setStatus(error.code === 'AUTH' && !error.redirected ? 'Reconnect needed' : 'Verification unavailable');
+          q = await api.problem(titleSlug, undefined);
+        } else {
+          throw error;
+        }
+      }
+    });
+    if (q) {
+      await store.cache({ ...q, status: null });
+      registered = await store.problems();
+      explorer.refresh();
+      await displayProblem(q);
+    }
+    return q;
+  }
+
+  async function openSignIn() {
+    await vscode.env.openExternal(vscode.Uri.parse('https://leetcode.com/accounts/login/'));
+    await vscode.window.showInformationMessage('Opened leetcode.com in your browser. Browser sign-in does not automatically connect VS Code; use Advanced: Import Session to store session cookies in SecretStorage.');
+  }
+
+  async function importSession() {
     if (connecting || jobs.busy) throw new LcError('BUSY', 'Finish the current account or remote operation first.');
     connecting = true;
     try {
-      const choice = await vscode.window.showInformationMessage('Sign in to leetcode.com in your browser. In Developer Tools → Application/Storage → Cookies → https://leetcode.com, copy LEETCODE_SESSION and csrftoken. Only their values go into the next two masked fields. They are stored in VS Code SecretStorage.', { modal: true }, 'Import Session', 'Open Sign-in');
-      if (!choice) return;
-      if (choice === 'Open Sign-in') await vscode.env.openExternal(vscode.Uri.parse('https://leetcode.com/accounts/login/'));
       const session = await vscode.window.showInputBox({ title: 'LeetCode: LEETCODE_SESSION', prompt: 'Paste the LEETCODE_SESSION cookie value only. Never paste your password.', password: true, ignoreFocusOut: true });
       if (session === undefined) return;
       const csrf = await vscode.window.showInputBox({ title: 'LeetCode: csrftoken', prompt: 'Paste the csrftoken cookie value only.', password: true, ignoreFocusOut: true });
       if (csrf === undefined) return;
       const auth = credentials(session, csrf);
       const user = await api.account(auth);
-      await context.secrets.store(SECRET, JSON.stringify(auth));
+      internalSecretWrite = true;
+      try {
+        await context.secrets.store(SECRET, JSON.stringify(auth));
+      } finally {
+        internalSecretWrite = false;
+      }
+      discovery.setAccountState('verified', { username: user, auth });
       setStatus(user);
+      if (discovery.initialized) {
+        await discovery.refreshAll();
+      }
       await vscode.window.showInformationMessage(`Connected to LeetCode as ${user}.`);
-    } finally { connecting = false; }
+    } finally {
+      connecting = false;
+    }
   }
+
+  async function connect() {
+    if (connecting || jobs.busy) throw new LcError('BUSY', 'Finish the current account or remote operation first.');
+    const choice = await vscode.window.showInformationMessage(
+      'Sign in to leetcode.com in your browser. Browser sign-in does not transfer cookies automatically. To connect VS Code for remote runs, submissions, and progress filters, choose Advanced: Import Session and paste LEETCODE_SESSION and csrftoken values into the masked fields (stored in VS Code SecretStorage).',
+      { modal: true },
+      'Open LeetCode Sign-in',
+      'Check Saved Session',
+      'Advanced: Import Session'
+    );
+    if (!choice) return;
+    if (choice === 'Open LeetCode Sign-in' || choice === 'Open Sign-in') {
+      await openSignIn();
+      return;
+    }
+    if (choice === 'Check Saved Session') {
+      const { user } = await verifiedAuth();
+      await vscode.window.showInformationMessage(`LeetCode session is valid: ${user}`);
+      return;
+    }
+    if (choice === 'Advanced: Import Session' || choice === 'Import Session') {
+      await importSession();
+    }
+  }
+
   async function openProblem() {
     const input = await vscode.window.showInputBox({ title: 'Open LeetCode Problem', prompt: 'Problem number, slug, title, or keyword', placeHolder: '1, two-sum, or binary search' });
     if (!input?.trim()) return;
     const query = input.trim();
-    let q;
-    const auth = await getAuth();
+    let targetSlug;
+    let preview;
+    const auth = discovery.activeAuth;
     await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'LeetCode: Finding problem' }, async () => {
       if (/^[a-z0-9]+(?:-[a-z0-9]+)+$/.test(query)) {
-        try { q = await api.problem(query, auth); return; }
-        catch (e) { if (e.code !== 'NOT_FOUND') throw e; }
+        try {
+          const q = await api.problem(query, auth || await tryGetAuth());
+          await store.cache({ ...q, status: null });
+          registered = await store.problems();
+          explorer.refresh();
+          await displayProblem(q);
+          return;
+        } catch (e) {
+          if (e.code !== 'NOT_FOUND') throw e;
+        }
       }
       let skip = 0;
       for (;;) {
@@ -144,30 +284,115 @@ async function createController(vscode, context, dependencies = {}) {
         if (/^\d+$/.test(query)) {
           // Frontend numbers differ from internal question IDs. Never guess.
           const match = list.questions.find(p => String(p.questionFrontendId) === query);
-          if (match) { q = await api.problem(match.titleSlug, auth); return; }
+          if (match) {
+            targetSlug = match.titleSlug;
+            preview = match;
+            return;
+          }
         }
         if (!list.questions.length) throw new LcError('NOT_FOUND', 'No matching LeetCode problems were found. Try a title or slug.');
-        const items = list.questions.map(p => ({ label: `${p.questionFrontendId}. ${p.title}`, description: `${p.difficulty}${p.isPaidOnly ? ' · Premium' : ''}${p.status === 'ac' ? ' · Solved' : ''}`, problem: p }));
+        const items = list.questions.map(p => ({
+          label: `${p.questionFrontendId}. ${p.title}`,
+          description: `${p.difficulty}${p.supported === false ? ' · Unsupported ID' : ''}${p.isPaidOnly ? ' · Premium' : ''}${discovery.isVerified && p.status === 'ac' ? ' · Solved' : discovery.isVerified && p.status === 'notac' ? ' · Attempted' : ''}`,
+          problem: p
+        }));
         if (skip + list.questions.length < list.total) items.push({ label: 'Load more results…', more: true });
         const item = await vscode.window.showQuickPick(items, { title: 'LeetCode Problems', placeHolder: `${list.total} matches · choose a problem` });
         if (!item) return;
         if (item.more) { skip += list.questions.length; continue; }
-        q = await api.problem(item.problem.titleSlug, auth);
+        targetSlug = item.problem.titleSlug;
+        preview = item.problem;
         return;
       }
     });
-    if (q) {
-      await store.cache(q);
-      registered = await store.problems();
-      await displayProblem(q);
+    if (targetSlug) {
+      await openProblemBySlug(targetSlug, preview);
     }
   }
+
   async function recent() {
     registered = await store.problems();
     if (!registered.length) throw new LcError('EMPTY', 'No local problems yet. Use Open Problem while connected to the internet.');
-    const picked = await vscode.window.showQuickPick(registered.map(q => ({ label: `${q.questionFrontendId}. ${q.title}`, description: q.difficulty, problem: q })), { title: 'Local LeetCode Problems', placeHolder: 'Available offline · existing code is preserved' });
-    if (picked) await displayProblem(picked.problem);
+    const picked = await vscode.window.showQuickPick(
+      registered.map(q => ({ label: `${q.questionFrontendId}. ${q.title}`, description: `${q.difficulty} · Available locally`, problem: q })),
+      { title: 'Local LeetCode Problems', placeHolder: 'Available offline · existing code is preserved' }
+    );
+    if (picked) await displayProblem({ ...picked.problem, status: null });
   }
+
+  async function openLocalProblemItem(itemOrProblem) {
+    const target = itemOrProblem?.problem || itemOrProblem;
+    if (!target?.titleSlug || !target?.questionFrontendId) {
+      return recent();
+    }
+    const file = store.file(target);
+    const q = await store.registered(file);
+    await displayProblem({ ...q, status: null });
+  }
+
+  async function filterSearch() {
+    const value = await vscode.window.showInputBox({
+      title: 'LeetCode: Filter by Search Keyword',
+      prompt: 'Enter a problem number, title, or keyword (leave empty for Any)',
+      value: discovery.filters.query,
+      placeHolder: 'e.g. binary tree, two sum, or 1'
+    });
+    if (value === undefined) return;
+    await discovery.setSearchQuery(value);
+  }
+
+  async function filterDifficulty() {
+    const items = [
+      { label: 'Any Difficulty', description: 'Show all difficulties', value: 'ANY' },
+      { label: 'Easy', value: 'EASY' },
+      { label: 'Medium', value: 'MEDIUM' },
+      { label: 'Hard', value: 'HARD' }
+    ];
+    const picked = await vscode.window.showQuickPick(items, {
+      title: 'LeetCode: Filter by Difficulty',
+      placeHolder: `Current: ${discovery.filters.difficulty}`
+    });
+    if (!picked) return;
+    await discovery.setDifficulty(picked.value);
+  }
+
+  async function filterTopics() {
+    const topics = await discovery.ensureTopics();
+    const active = new Set(discovery.filters.tags);
+    const items = topics.map(t => ({
+      label: t.name,
+      description: t.slug,
+      slug: t.slug,
+      picked: active.has(t.slug)
+    }));
+    const selected = await vscode.window.showQuickPick(items, {
+      title: 'LeetCode: Filter by Topics',
+      placeHolder: 'Select up to 20 topics (or none to clear topic filter)',
+      canPickMany: true
+    });
+    if (selected === undefined) return;
+    const list = Array.isArray(selected) ? selected : [selected];
+    await discovery.setTopics(list.map(i => i.slug));
+  }
+
+  async function filterStatus() {
+    if (!discovery.isVerified) {
+      throw new LcError('AUTH', 'Check Saved Session or Import Session to verify your LeetCode account before filtering by progress.');
+    }
+    const items = [
+      { label: 'All Problems', value: 'ALL' },
+      { label: 'Solved', description: 'Accepted on LeetCode', value: 'AC' },
+      { label: 'Attempted', description: 'Tried but not yet Accepted', value: 'TRIED' },
+      { label: 'Not started', description: 'No submissions on this verified account', value: 'NOT_STARTED' }
+    ];
+    const picked = await vscode.window.showQuickPick(items, {
+      title: 'LeetCode: Filter by Account Progress',
+      placeHolder: `Verified as ${discovery.account.username}`
+    });
+    if (!picked) return;
+    await discovery.setStatusFilter(picked.value);
+  }
+
   async function run(kind, uri, custom = false) {
     // Snapshot before the first asynchronous operation. Never read another editor
     // after authentication, input selection, or network calls change focus.
@@ -186,34 +411,83 @@ async function createController(vscode, context, dependencies = {}) {
       if (Buffer.byteLength(input) > 1024 * 1024) throw new LcError('SIZE', 'Test input exceeds the 1 MiB limit.');
     }
     const { auth, user } = await verifiedAuth();
+    const originAccountGen = discovery.accountGeneration;
     output.appendLine(`\n${kind === 'submit' ? 'SUBMISSION' : 'REMOTE TEST'} · ${q.questionFrontendId}. ${q.title} · editor version ${snapshot.version}${snapshot.dirty ? ' (includes unsaved edits; Ctrl+S to save locally)' : ''}`);
     output.show(true);
     const record = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: kind === 'submit' ? 'Submitting to LeetCode' : 'Running on LeetCode', cancellable: true }, (progress, token) => jobs.start(kind, q, snapshot, input, auth, user, message => progress.report({ message }), token));
-    if (record) present(record);
+    if (record) {
+      present(record);
+      if (kind === 'submit' && record.result?.state === 'SUCCESS') {
+        await discovery.refreshAfterSubmission(user, originAccountGen);
+      }
+    }
   }
+
   function present(record) {
     output.appendLine('\n' + formatResult(record));
     output.show(true);
     lenses.fire();
   }
+
   async function resume() {
     const { auth, user } = await verifiedAuth();
-    const record = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'Retrieving LeetCode result', cancellable: true }, (p,t) => jobs.resume(auth, user, message => p.report({ message }), t));
-    if (record) present(record);
+    const originAccountGen = discovery.accountGeneration;
+    const record = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'Retrieving LeetCode result', cancellable: true }, (p, t) => jobs.resume(auth, user, message => p.report({ message }), t));
+    if (record) {
+      present(record);
+      if (record.job?.kind === 'submit' && record.result?.state === 'SUCCESS') {
+        await discovery.refreshAfterSubmission(user, originAccountGen);
+      }
+    }
   }
+
   async function updateEditorContext(editor) {
     await vscode.commands.executeCommand('setContext', 'lc.isSolution', isRegistered(editor?.document.uri));
   }
 
   command('lc.connect', connect);
-  command('lc.account', async () => { const {user} = await verifiedAuth(); await vscode.window.showInformationMessage(`LeetCode session is valid: ${user}`); });
+  command('lc.openSignIn', openSignIn);
+  command('lc.importSession', importSession);
+  command('lc.account', async () => { const { user } = await verifiedAuth(); await vscode.window.showInformationMessage(`LeetCode session is valid: ${user}`); });
   command('lc.disconnect', async () => {
     if (jobs.busy || connecting) throw new LcError('BUSY', 'Finish or stop waiting for the current operation before disconnecting.');
-    await context.secrets.delete(SECRET); setStatus('Disconnected');
+    internalSecretWrite = true;
+    try {
+      await context.secrets.delete(SECRET);
+    } finally {
+      internalSecretWrite = false;
+    }
+    discovery.setAccountState('signed_out');
+    await discovery.persistFilters();
+    setStatus('Disconnected');
+    if (discovery.initialized) {
+      await discovery.refreshAll();
+    }
     await vscode.window.showInformationMessage('LeetCode session removed from VS Code. Pending operations and local code are preserved.');
   });
   command('lc.open', openProblem);
+  command('lc.openProblemItem', async item => {
+    const problem = item?.problem || (typeof item === 'object' ? item : undefined);
+    const targetSlug = typeof item === 'string' ? item : problem?.titleSlug;
+    if (!targetSlug) throw new LcError('SELECTION', 'Choose a LeetCode problem to open.');
+    await openProblemBySlug(targetSlug, problem);
+  });
   command('lc.recent', recent);
+  command('lc.openLocalProblem', openLocalProblemItem);
+  command('lc.refreshExplorer', async () => {
+    registered = await store.problems();
+    await discovery.refreshAll();
+    explorer.refresh();
+  });
+  command('lc.refreshDaily', () => discovery.refreshDaily());
+  command('lc.refreshCatalog', () => discovery.refreshCatalog());
+  command('lc.filterSearch', filterSearch);
+  command('lc.filterDifficulty', filterDifficulty);
+  command('lc.filterTopics', filterTopics);
+  command('lc.filterStatus', filterStatus);
+  command('lc.clearFilters', () => discovery.clearFilters());
+  command('lc.nextPage', () => discovery.nextPage());
+  command('lc.prevPage', () => discovery.prevPage());
   command('lc.description', async () => {
     const q = await selectedProblem();
     const visible = vscode.window.visibleTextEditors.find(e => isRegistered(e.document.uri));
@@ -244,13 +518,30 @@ async function createController(vscode, context, dependencies = {}) {
     if (record) present(record); else { output.appendLine('No completed remote result saved yet. Use Retrieve Pending Result for an unfinished operation.'); output.show(true); }
   });
   command('lc.folder', async () => { await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(store.root)); });
-  context.subscriptions.push(output, status, lenses,
+
+  if (typeof vscode.window.registerTreeDataProvider === 'function') {
+    context.subscriptions.push(vscode.window.registerTreeDataProvider('lc.explorer', explorer));
+  }
+  if (typeof context.secrets.onDidChange === 'function') {
+    context.subscriptions.push(context.secrets.onDidChange(async e => {
+      if (disposed || internalSecretWrite || (e?.key && e.key !== SECRET)) return;
+      const saved = await context.secrets.get(SECRET);
+      discovery.setAccountState(saved ? 'unverified' : 'signed_out');
+      await discovery.persistFilters();
+      setStatus(saved ? 'Session stored' : 'Disconnected');
+      if (discovery.initialized) {
+        await discovery.refreshAll();
+      }
+    }));
+  }
+
+  context.subscriptions.push(output, status, lenses, explorer,
     vscode.window.onDidChangeActiveTextEditor(e => { updateEditorContext(e).catch(report); }),
     vscode.languages.registerCodeLensProvider({ scheme: 'file', language: 'cpp' }, {
       onDidChangeCodeLenses: lenses.event,
       provideCodeLenses(document) {
         if (!isRegistered(document.uri)) return [];
-        return [['Run Examples on LeetCode','lc.run'],['Run Custom Input','lc.runCustom'],['Submit to LeetCode','lc.submit'],['Description','lc.description']].map(([title,commandId]) => new vscode.CodeLens(new vscode.Range(0,0,0,0), { title, command: commandId, arguments: commandId === 'lc.description' ? [] : [document.uri] }));
+        return [['Run Examples on LeetCode', 'lc.run'], ['Run Custom Input', 'lc.runCustom'], ['Submit to LeetCode', 'lc.submit'], ['Description', 'lc.description']].map(([title, commandId]) => new vscode.CodeLens(new vscode.Range(0, 0, 0, 0), { title, command: commandId, arguments: commandId === 'lc.description' ? [] : [document.uri] }));
       }
     }),
     { dispose() { disposed = true; } });
@@ -261,7 +552,23 @@ async function createController(vscode, context, dependencies = {}) {
     vscode.window.showInformationMessage('LeetCode has a pending operation. Use Retrieve Pending Result to continue.');
   }
   // No startup network calls or implicit restoration of editors/layout.
-  return { store, api, jobs, capture, run, connect, openProblem, recent, resume, getAuth };
+  return {
+    store,
+    api,
+    jobs,
+    discovery,
+    explorer,
+    capture,
+    run,
+    connect,
+    openSignIn,
+    importSession,
+    openProblem,
+    openProblemBySlug,
+    recent,
+    resume,
+    getAuth
+  };
 }
 
 async function activate(context) {

@@ -18,12 +18,43 @@
     "package": "python3 scripts/package.py"
   },
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "leetcode-explorer",
+          "title": "LeetCode",
+          "icon": "media/leetcode.svg"
+        }
+      ]
+    },
+    "views": {
+      "leetcode-explorer": [
+        {
+          "id": "lc.explorer",
+          "name": "LeetCode"
+        }
+      ]
+    },
     "commands": [
       { "command": "lc.connect", "title": "LeetCode: Connect Account" },
+      { "command": "lc.openSignIn", "title": "LeetCode: Open LeetCode Sign-in" },
+      { "command": "lc.importSession", "title": "LeetCode: Advanced: Import Session" },
       { "command": "lc.disconnect", "title": "LeetCode: Disconnect Account" },
-      { "command": "lc.account", "title": "LeetCode: Check Account Status" },
+      { "command": "lc.account", "title": "LeetCode: Check Saved Session" },
       { "command": "lc.open", "title": "LeetCode: Open Problem" },
+      { "command": "lc.openProblemItem", "title": "LeetCode: Open Selected Problem" },
       { "command": "lc.recent", "title": "LeetCode: Reopen Local Problem" },
+      { "command": "lc.openLocalProblem", "title": "LeetCode: Open Local Problem" },
+      { "command": "lc.refreshExplorer", "title": "LeetCode: Refresh Explorer", "icon": "$(refresh)" },
+      { "command": "lc.refreshDaily", "title": "LeetCode: Refresh Daily Challenge" },
+      { "command": "lc.refreshCatalog", "title": "LeetCode: Refresh Problem List" },
+      { "command": "lc.filterSearch", "title": "LeetCode: Filter by Search Keyword", "icon": "$(search)" },
+      { "command": "lc.filterDifficulty", "title": "LeetCode: Filter by Difficulty", "icon": "$(filter)" },
+      { "command": "lc.filterTopics", "title": "LeetCode: Filter by Topics", "icon": "$(tag)" },
+      { "command": "lc.filterStatus", "title": "LeetCode: Filter by Account Progress", "icon": "$(pass)" },
+      { "command": "lc.clearFilters", "title": "LeetCode: Clear Problem Filters", "icon": "$(clear-all)" },
+      { "command": "lc.nextPage", "title": "LeetCode: Next Problem Page", "icon": "$(arrow-right)" },
+      { "command": "lc.prevPage", "title": "LeetCode: Previous Problem Page", "icon": "$(arrow-left)" },
       { "command": "lc.description", "title": "LeetCode: Show Problem Description" },
       { "command": "lc.run", "title": "LeetCode: Run Examples on LeetCode", "icon": "$(play)" },
       { "command": "lc.custom", "title": "LeetCode: Edit Custom Test Input" },
@@ -38,6 +69,15 @@
       "editor/title": [
         { "command": "lc.run", "when": "resourceScheme == file && resourceExtname == .cpp && lc.isSolution", "group": "navigation@1" },
         { "command": "lc.submit", "when": "resourceScheme == file && resourceExtname == .cpp && lc.isSolution", "group": "navigation@2" }
+      ],
+      "view/title": [
+        { "command": "lc.filterSearch", "when": "view == lc.explorer", "group": "navigation@1" },
+        { "command": "lc.clearFilters", "when": "view == lc.explorer", "group": "navigation@2" },
+        { "command": "lc.refreshExplorer", "when": "view == lc.explorer", "group": "navigation@3" }
+      ],
+      "view/item/context": [
+        { "command": "lc.openProblemItem", "when": "view == lc.explorer && viewItem == lc.problemItem", "group": "inline@1" },
+        { "command": "lc.openLocalProblem", "when": "view == lc.explorer && viewItem == lc.localProblemItem", "group": "inline@1" }
       ]
     }
   }

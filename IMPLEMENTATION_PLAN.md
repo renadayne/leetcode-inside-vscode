@@ -230,6 +230,6 @@ Architecture review: GO for T1, with the following acceptance clarifications:
 - [x] Sol architecture review (GO with requirements recorded above).
 - [x] T1 implemented; verification identified status normalization and unsupported-ID defects.
 - [x] T1 verification defects corrected by Antigravity; 27 tests passed, baseline Windows symlink EPERM remains for T4. Live anonymous list/topics/Daily verified on 2026-10-27.
-- [ ] T2 implemented and output verified.
+- [x] T2 implemented and output verified: 31 tests passed, baseline symlink EPERM remains; desktop rendering not yet verified.
 - [ ] T3 implemented and output verified.
 - [ ] T4 implemented and final output validation completed.
