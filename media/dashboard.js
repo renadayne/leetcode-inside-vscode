@@ -53,6 +53,39 @@
     }
   }
 
+  function computeActionHint(state) {
+    if (state.busy) {
+      return 'Remote operation in progress on LeetCode… Duplicate runs and submissions are blocked until completion.';
+    }
+    if (state.pendingJob) {
+      return (
+        'Pending ' +
+        (state.pendingJob.kind === 'submit' ? 'submission' : 'remote test') +
+        ' for ' +
+        state.pendingJob.number +
+        '. ' +
+        state.pendingJob.title +
+        '. Use "Retrieve Pending Result" or "Clear Pending Operation" under More Actions before running or submitting again.'
+      );
+    }
+    if (!state.currentProblem) {
+      return 'No problem selected. Click "Open" on any problem in Explore or My Problems to select a C++ solution.';
+    }
+    if (!state.currentProblem.editorOpen) {
+      return (
+        'The editor for ' +
+        (state.currentProblem.fileName || 'this solution') +
+        ' is closed. Click "Open Code" to reopen the C++ solution before running or submitting.'
+      );
+    }
+    return (
+      'Target locked to ' +
+      (state.currentProblem.fileName || 'registered C++ solution') +
+      (state.currentProblem.dirty ? ' (includes unsaved editor changes)' : '') +
+      '. Moving focus to this dashboard will not change the target file.'
+    );
+  }
+
   function renderNotice(state) {
     const container = document.getElementById('lc-notice-region');
     if (!container) return;
@@ -77,6 +110,91 @@
     container.appendChild(box);
   }
 
+  function updateButtonState(id, enabled, enabledTitle, disabledTitle) {
+    const btn = document.getElementById(id);
+    if (!btn) return;
+    btn.disabled = !enabled;
+    btn.title = enabled ? enabledTitle : disabledTitle;
+  }
+
+  function renderPendingAndResult(state) {
+    const pendingRegion = document.getElementById('lc-pending-region');
+    if (pendingRegion) {
+      clearChildren(pendingRegion);
+      if (state.pendingJob) {
+        const box = createEl('div', 'lc-status-box');
+        box.setAttribute('role', 'status');
+        const label =
+          'Pending ' +
+          (state.pendingJob.kind === 'submit' ? 'submission' : 'test') +
+          ': ' +
+          state.pendingJob.number +
+          '. ' +
+          state.pendingJob.title +
+          (state.pendingJob.id ? ' (ID: ' + state.pendingJob.id + ')' : ' (unconfirmed ID)');
+        box.appendChild(createEl('span', '', label));
+
+        const actions = createEl('div', 'lc-action-row');
+        const resumeBtn = createEl('button', 'lc-btn', 'Retrieve Pending Result');
+        resumeBtn.type = 'button';
+        resumeBtn.disabled = Boolean(state.busy);
+        resumeBtn.setAttribute('data-action', 'problemAction');
+        resumeBtn.setAttribute('data-kind', 'resume');
+        actions.appendChild(resumeBtn);
+
+        const clearBtn = createEl('button', 'lc-btn lc-btn-secondary', 'Clear Pending Operation');
+        clearBtn.type = 'button';
+        clearBtn.disabled = Boolean(state.busy);
+        clearBtn.setAttribute('data-action', 'problemAction');
+        clearBtn.setAttribute('data-kind', 'clearPending');
+        actions.appendChild(clearBtn);
+
+        box.appendChild(actions);
+        pendingRegion.appendChild(box);
+      }
+    }
+
+    const resultRegion = document.getElementById('lc-result-region');
+    if (resultRegion) {
+      clearChildren(resultRegion);
+      const r = state.lastResult;
+      if (r) {
+        const box = createEl('div', 'lc-status-box');
+        box.setAttribute('role', 'region');
+        box.setAttribute('aria-label', 'Latest Remote Result');
+        const main = createEl('div', 'lc-item-main');
+        main.appendChild(
+          createEl(
+            'div',
+            'lc-item-title',
+            r.heading + ' · ' + r.problemNumber + '. ' + r.problemTitle + ' — Verdict: ' + r.verdict
+          )
+        );
+        const details = [];
+        if (r.runtime) details.push('Runtime: ' + r.runtime);
+        if (r.memory) details.push('Memory: ' + r.memory);
+        if (r.passed) details.push('Passed: ' + r.passed);
+        if (r.editorVersion !== null && r.editorVersion !== undefined) {
+          details.push('Editor v' + r.editorVersion);
+        }
+        if (details.length > 0) {
+          main.appendChild(createEl('div', 'lc-item-meta', details.join(' · ')));
+        }
+        const extra = [];
+        if (r.actualOutput) extra.push('Actual: ' + r.actualOutput);
+        if (r.expectedOutput) extra.push('Expected: ' + r.expectedOutput);
+        if (r.failingInput) extra.push('Input: ' + r.failingInput);
+        if (r.compileError) extra.push('Compiler: ' + r.compileError);
+        if (r.runtimeError) extra.push('Runtime error: ' + r.runtimeError);
+        if (extra.length > 0) {
+          main.appendChild(createEl('div', 'lc-item-meta', extra.join(' | ')));
+        }
+        box.appendChild(main);
+        resultRegion.appendChild(box);
+      }
+    }
+  }
+
   function renderHeaderAndCurrent(state) {
     const pill = document.getElementById('lc-account-summary-pill');
     if (pill && state.account) {
@@ -88,23 +206,83 @@
       localTab.textContent = 'My Problems (' + state.localProblems.length + ')';
     }
 
+    const current = state.currentProblem;
     const currentTitle = document.getElementById('lc-current-problem-title');
     const currentFile = document.getElementById('lc-current-problem-file');
     if (currentTitle && currentFile) {
-      if (state.currentProblem) {
+      if (current) {
         currentTitle.textContent =
-          state.currentProblem.questionFrontendId +
-          '. ' +
-          state.currentProblem.title +
-          ' (' +
-          state.currentProblem.difficulty +
-          ')';
-        currentFile.textContent = state.currentProblem.fileName || 'Registered C++ solution';
+          current.questionFrontendId + '. ' + current.title + ' (' + current.difficulty + ')';
+        currentFile.textContent =
+          (current.fileName || 'Registered C++ solution') +
+          (current.dirty ? ' (unsaved edits)' : '') +
+          (!current.editorOpen ? ' (editor closed)' : '');
       } else {
         currentTitle.textContent = 'No problem selected';
         currentFile.textContent = 'Open a problem from Explore or My Problems below to select a C++ solution.';
       }
     }
+
+    const canOpenProblemDocs = Boolean(current);
+    const canExecuteSolution = Boolean(current && current.editorOpen && !state.busy && !state.pendingJob);
+    const canRunTests = Boolean(canExecuteSolution && current.enableRunCode !== false);
+    const canManagePending = Boolean(state.pendingJob && !state.busy);
+
+    updateButtonState(
+      'lc-action-openCode',
+      canOpenProblemDocs,
+      'Open or reveal the registered C++ solution editor',
+      'Select a problem first'
+    );
+    updateButtonState(
+      'lc-action-description',
+      canOpenProblemDocs,
+      'Show problem description',
+      'Select a problem first'
+    );
+    updateButtonState(
+      'lc-action-run',
+      canRunTests,
+      'Run example testcases on LeetCode using the selected C++ buffer',
+      'Requires an open selected C++ solution editor and no pending operation'
+    );
+    updateButtonState(
+      'lc-action-customInput',
+      canOpenProblemDocs,
+      'Edit custom test input file for the selected problem',
+      'Select a problem first'
+    );
+    updateButtonState(
+      'lc-action-runCustom',
+      canRunTests,
+      'Run custom test input on LeetCode using the selected C++ buffer',
+      'Requires an open selected C++ solution editor and no pending operation'
+    );
+    updateButtonState(
+      'lc-action-submit',
+      canExecuteSolution,
+      'Submit selected C++ solution to LeetCode',
+      'Requires an open selected C++ solution editor and no pending operation'
+    );
+    updateButtonState(
+      'lc-action-resume',
+      canManagePending,
+      'Retrieve result of pending operation without resending code',
+      'No pending operation to retrieve'
+    );
+    updateButtonState(
+      'lc-action-clearPending',
+      canManagePending,
+      'Clear pending operation lock after checking submission history',
+      'No pending operation to clear'
+    );
+
+    const hintEl = document.getElementById('lc-current-action-hint');
+    if (hintEl) {
+      hintEl.textContent = computeActionHint(state);
+    }
+
+    renderPendingAndResult(state);
   }
 
   function syncFilterControls(catalog, account) {
@@ -623,6 +801,11 @@
       const direction = target.getAttribute('data-direction');
       if (direction === 'next' || direction === 'prev') {
         postAction({ action: 'changePage', direction: direction });
+      }
+    } else if (action === 'problemAction') {
+      const kind = target.getAttribute('data-kind');
+      if (kind) {
+        postAction({ action: 'problemAction', kind: kind });
       }
     }
   });

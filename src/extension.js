@@ -20,9 +20,12 @@ async function createController(vscode, context, dependencies = {}) {
   const lenses = new vscode.EventEmitter();
   let panel;
   let current;
+  let selectedUri;
   let registered = await store.problems();
   let disposed = false;
   let connecting = false;
+  let remoteBusy = false;
+  let lastPresentedResult = null;
   let internalSecretWrite = false;
   let explorer;
   let dashboard;
@@ -45,23 +48,47 @@ async function createController(vscode, context, dependencies = {}) {
     mediaRoot,
     openProblemBySlug: (slug, preview) => openProblemBySlug(slug, preview),
     openLocalProblem: problem => openLocalProblemItem(problem),
+    executeProblemAction: kind => executeProblemAction(kind),
+    isBusy: () => remoteBusy || Boolean(jobs.busy) || connecting,
+    getPendingJob: () => store.pending(),
+    getLastResult: async () => lastPresentedResult || await store.readJSON('last-result.json'),
     onError: error => report(error),
     getLocalProblems: async () => {
       registered = await store.problems();
       return registered;
     },
     getCurrentProblem: async () => {
-      const uri = vscode.window.activeTextEditor?.document?.uri;
-      if (isRegistered(uri)) {
+      const activeUri = vscode.window.activeTextEditor?.document?.uri;
+      if (isRegistered(activeUri) && findOpenDocument(activeUri)) {
+        selectedUri = activeUri;
+      }
+      if (selectedUri && isRegistered(selectedUri)) {
         try {
-          const q = await store.registered(uri.fsPath);
-          return { ...q, fileName: path.basename(uri.fsPath) };
+          const q = await store.registered(selectedUri.fsPath);
+          const openDoc = findOpenDocument(selectedUri);
+          return {
+            ...q,
+            status: current?.titleSlug === q.titleSlug ? current.status : null,
+            fileName: path.basename(selectedUri.fsPath),
+            editorOpen: Boolean(openDoc),
+            dirty: Boolean(openDoc?.isDirty),
+            enableRunCode: q.enableRunCode !== false
+          };
         } catch {
           // Fall back to current problem in memory
         }
       }
       if (current) {
-        return { ...current, fileName: path.basename(store.file(current)) };
+        const file = store.file(current);
+        const fileUri = vscode.Uri.file(file);
+        const openDoc = findOpenDocument(fileUri);
+        return {
+          ...current,
+          fileName: path.basename(file),
+          editorOpen: Boolean(openDoc),
+          dirty: Boolean(openDoc?.isDirty),
+          enableRunCode: current.enableRunCode !== false
+        };
       }
       return undefined;
     }
@@ -194,10 +221,31 @@ async function createController(vscode, context, dependencies = {}) {
     return localUri(uri) && registered.some(q => store.file(q) === uri.fsPath);
   }
 
+  function findOpenDocument(uri) {
+    if (!uri || typeof uri.toString !== 'function') return undefined;
+    const doc = vscode.workspace.textDocuments.find(d => d.uri.toString() === uri.toString());
+    if (doc) return doc.isClosed ? undefined : doc;
+    const activeDoc = vscode.window.activeTextEditor?.document;
+    if (activeDoc && activeDoc.uri?.toString() === uri.toString() && !activeDoc.isClosed) return activeDoc;
+    return undefined;
+  }
+
+  function requireSelectedSolutionUri() {
+    if (!selectedUri || !isRegistered(selectedUri)) {
+      throw new LcError('SELECTION', 'Select a registered LeetCode C++ solution editor before running or submitting.');
+    }
+    const doc = findOpenDocument(selectedUri);
+    if (!doc) {
+      throw new LcError('SELECTION', 'The selected LeetCode C++ solution editor is closed. Use Open Code to reopen it before running or submitting.');
+    }
+    return selectedUri;
+  }
+
   function capture(uri) {
-    const doc = uri && typeof uri.toString === 'function'
-      ? vscode.workspace.textDocuments.find(d => d.uri.toString() === uri.toString())
-      : vscode.window.activeTextEditor?.document;
+    const targetUri = uri && typeof uri.toString === 'function'
+      ? uri
+      : (vscode.window.activeTextEditor ? vscode.window.activeTextEditor.document?.uri : selectedUri);
+    const doc = findOpenDocument(targetUri);
     if (!doc || !isRegistered(doc.uri)) throw new LcError('SELECTION', 'Select a registered LeetCode C++ solution editor before running or submitting.');
     const code = doc.getText();
     if (!code.trim()) throw new LcError('EMPTY', 'The solution is empty. Write some C++ before sending it.');
@@ -206,9 +254,14 @@ async function createController(vscode, context, dependencies = {}) {
   }
 
   async function selectedProblem() {
-    const uri = vscode.window.activeTextEditor?.document.uri;
+    const uri = vscode.window.activeTextEditor?.document?.uri;
     if (isRegistered(uri)) {
+      selectedUri = uri;
       const q = await store.registered(uri.fsPath);
+      return { ...q, status: null };
+    }
+    if (selectedUri && isRegistered(selectedUri)) {
+      const q = await store.registered(selectedUri.fsPath);
       return { ...q, status: null };
     }
     if (current) return current;
@@ -238,11 +291,14 @@ async function createController(vscode, context, dependencies = {}) {
     // Reuse the existing solution column, so revisiting doesn't create new splits.
     const visible = vscode.window.visibleTextEditors.find(e => isRegistered(e.document.uri));
     showDescription(q);
-    const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
+    const fileUri = vscode.Uri.file(file);
+    const doc = await vscode.workspace.openTextDocument(fileUri);
+    if (doc && typeof doc === 'object') doc.isClosed = false;
+    selectedUri = doc?.uri || fileUri;
     const solutionColumn = visible?.viewColumn && visible.viewColumn !== panel.viewColumn ? visible.viewColumn : vscode.ViewColumn.Beside;
     await vscode.window.showTextDocument(doc, { viewColumn: solutionColumn, preview: false });
     lenses.fire();
-    if (dashboard && dashboard.isOpen) dashboard.refresh();
+    if (dashboard && dashboard.isOpen) await dashboard.refresh();
     await context.globalState.update('lastProblem', q.titleSlug);
   }
 
@@ -280,7 +336,7 @@ async function createController(vscode, context, dependencies = {}) {
   }
 
   async function importSession() {
-    if (connecting || jobs.busy) throw new LcError('BUSY', 'Finish the current account or remote operation first.');
+    if (connecting || remoteBusy || jobs.busy) throw new LcError('BUSY', 'Finish the current account or remote operation first.');
     connecting = true;
     try {
       const session = await vscode.window.showInputBox({ title: 'LeetCode: LEETCODE_SESSION', prompt: 'Paste the LEETCODE_SESSION cookie value only. Never paste your password.', password: true, ignoreFocusOut: true });
@@ -324,7 +380,7 @@ async function createController(vscode, context, dependencies = {}) {
   }
 
   async function connect() {
-    if (connecting || jobs.busy) throw new LcError('BUSY', 'Finish the current account or remote operation first.');
+    if (connecting || remoteBusy || jobs.busy) throw new LcError('BUSY', 'Finish the current account or remote operation first.');
     const choice = await vscode.window.showInformationMessage(
       'Sign in to leetcode.com in your browser. Browser sign-in does not transfer cookies automatically. To connect VS Code for remote runs, submissions, and progress filters, choose Advanced: Import Session and paste LEETCODE_SESSION and csrftoken values into the masked fields (stored in VS Code SecretStorage).',
       { modal: true },
@@ -483,55 +539,157 @@ async function createController(vscode, context, dependencies = {}) {
   }
 
   async function run(kind, uri, custom = false) {
+    if (remoteBusy || jobs.busy || connecting) {
+      throw new LcError('BUSY', 'Finish or stop waiting for the current operation first.');
+    }
     // Snapshot before the first asynchronous operation. Never read another editor
     // after authentication, input selection, or network calls change focus.
     const snapshot = capture(uri);
-    const q = await store.registered(snapshot.file);
-    let input;
-    if (kind === 'test') {
-      if (q.enableRunCode === false) throw new LcError('UNSUPPORTED', 'LeetCode does not permit remote tests for this problem.');
-      if (custom) {
-        const file = await store.custom(q);
-        await store.safe(file, true);
-        const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
-        input = doc.getText(); // includes unsaved custom input
-      } else input = q.exampleTestcases || q.sampleTestCase;
-      if (!input?.trim()) throw new LcError('INPUT', 'No example input is available. Use Edit Custom Test Input, then Run Custom Input.');
-      if (Buffer.byteLength(input) > 1024 * 1024) throw new LcError('SIZE', 'Test input exceeds the 1 MiB limit.');
-    }
-    const { auth, user } = await verifiedAuth();
-    const originAccountGen = discovery.accountGeneration;
-    output.appendLine(`\n${kind === 'submit' ? 'SUBMISSION' : 'REMOTE TEST'} · ${q.questionFrontendId}. ${q.title} · editor version ${snapshot.version}${snapshot.dirty ? ' (includes unsaved edits; Ctrl+S to save locally)' : ''}`);
-    output.show(true);
-    const record = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: kind === 'submit' ? 'Submitting to LeetCode' : 'Running on LeetCode', cancellable: true }, (progress, token) => jobs.start(kind, q, snapshot, input, auth, user, message => progress.report({ message }), token));
-    if (record) {
-      present(record);
-      if (kind === 'submit' && record.result?.state === 'SUCCESS') {
-        await discovery.refreshAfterSubmission(user, originAccountGen);
+    remoteBusy = true;
+    if (dashboard && dashboard.isOpen) dashboard.refresh();
+    try {
+      const q = await store.registered(snapshot.file);
+      let input;
+      if (kind === 'test') {
+        if (q.enableRunCode === false) throw new LcError('UNSUPPORTED', 'LeetCode does not permit remote tests for this problem.');
+        if (custom) {
+          const file = await store.custom(q);
+          await store.safe(file, true);
+          const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
+          input = doc.getText(); // includes unsaved custom input
+        } else input = q.exampleTestcases || q.sampleTestCase;
+        if (!input?.trim()) throw new LcError('INPUT', 'No example input is available. Use Edit Custom Test Input, then Run Custom Input.');
+        if (Buffer.byteLength(input) > 1024 * 1024) throw new LcError('SIZE', 'Test input exceeds the 1 MiB limit.');
       }
+      const { auth, user } = await verifiedAuth();
+      const originAccountGen = discovery.accountGeneration;
+      output.appendLine(`\n${kind === 'submit' ? 'SUBMISSION' : 'REMOTE TEST'} · ${q.questionFrontendId}. ${q.title} · editor version ${snapshot.version}${snapshot.dirty ? ' (includes unsaved edits; Ctrl+S to save locally)' : ''}`);
+      output.show(true);
+      const record = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: kind === 'submit' ? 'Submitting to LeetCode' : 'Running on LeetCode', cancellable: true }, (progress, token) => jobs.start(kind, q, snapshot, input, auth, user, message => progress.report({ message }), token));
+      if (record) {
+        present(record);
+        if (kind === 'submit' && record.result?.state === 'SUCCESS') {
+          await discovery.refreshAfterSubmission(user, originAccountGen);
+        }
+      }
+    } finally {
+      remoteBusy = false;
+      if (dashboard && dashboard.isOpen) await dashboard.refresh();
     }
   }
 
   function present(record) {
+    lastPresentedResult = record;
     output.appendLine('\n' + formatResult(record));
     output.show(true);
     lenses.fire();
   }
 
   async function resume() {
-    const { auth, user } = await verifiedAuth();
-    const originAccountGen = discovery.accountGeneration;
-    const record = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'Retrieving LeetCode result', cancellable: true }, (p, t) => jobs.resume(auth, user, message => p.report({ message }), t));
-    if (record) {
-      present(record);
-      if (record.job?.kind === 'submit' && record.result?.state === 'SUCCESS') {
-        await discovery.refreshAfterSubmission(user, originAccountGen);
+    if (remoteBusy || jobs.busy || connecting) {
+      throw new LcError('BUSY', 'Finish or stop waiting for the current operation first.');
+    }
+    remoteBusy = true;
+    if (dashboard && dashboard.isOpen) dashboard.refresh();
+    try {
+      const { auth, user } = await verifiedAuth();
+      const originAccountGen = discovery.accountGeneration;
+      const record = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'Retrieving LeetCode result', cancellable: true }, (p, t) => jobs.resume(auth, user, message => p.report({ message }), t));
+      if (record) {
+        present(record);
+        if (record.job?.kind === 'submit' && record.result?.state === 'SUCCESS') {
+          await discovery.refreshAfterSubmission(user, originAccountGen);
+        }
       }
+    } finally {
+      remoteBusy = false;
+      if (dashboard && dashboard.isOpen) await dashboard.refresh();
+    }
+  }
+
+  async function openCurrentCode() {
+    const q = await selectedProblem();
+    await displayProblem(q);
+  }
+
+  async function openCurrentDescription() {
+    const q = await selectedProblem();
+    const visible = vscode.window.visibleTextEditors.find(e => isRegistered(e.document.uri));
+    showDescription(q);
+    if (visible && visible.viewColumn === panel.viewColumn) await vscode.window.showTextDocument(visible.document, { viewColumn: vscode.ViewColumn.Beside, preview: false });
+  }
+
+  async function editCustomInput() {
+    const q = await selectedProblem();
+    const file = await store.custom(q);
+    const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
+    if (doc && typeof doc === 'object') doc.isClosed = false;
+    await vscode.window.showTextDocument(doc, { preview: false });
+    await vscode.window.showInformationMessage('Use LeetCode input format: one argument per line; repeat arguments for additional cases. Return to the solution editor and choose Run Custom Input.');
+  }
+
+  async function clearPending() {
+    if (remoteBusy || jobs.busy) throw new LcError('BUSY', 'Stop waiting for the current operation first.');
+    const pending = await store.pending();
+    if (!pending) return;
+    const choice = await vscode.window.showWarningMessage('Clearing this record does not cancel execution on LeetCode. If no result ID was saved, first check your submission history. Sending again may duplicate your submission.', { modal: true }, 'Clear Pending Record');
+    if (choice === 'Clear Pending Record') {
+      await store.release();
+      if (dashboard && dashboard.isOpen) await dashboard.refresh();
+    }
+  }
+
+  async function showResults() {
+    const record = await store.readJSON('last-result.json');
+    output.clear();
+    if (record) present(record); else { output.appendLine('No completed remote result saved yet. Use Retrieve Pending Result for an unfinished operation.'); output.show(true); }
+    if (dashboard && dashboard.isOpen) await dashboard.refresh();
+  }
+
+  async function openFolder() {
+    await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(store.root));
+  }
+
+  async function executeProblemAction(kind) {
+    switch (kind) {
+      case 'openCode':
+        return openCurrentCode();
+      case 'description':
+        return openCurrentDescription();
+      case 'run':
+        return run('test', requireSelectedSolutionUri(), false);
+      case 'customInput':
+        return editCustomInput();
+      case 'runCustom':
+        return run('test', requireSelectedSolutionUri(), true);
+      case 'submit':
+        return run('submit', requireSelectedSolutionUri(), false);
+      case 'results':
+        return showResults();
+      case 'resume':
+        return resume();
+      case 'clearPending':
+        return clearPending();
+      case 'folder':
+        return openFolder();
+      default:
+        throw new LcError('UNSUPPORTED', 'Unsupported problem action.');
     }
   }
 
   async function updateEditorContext(editor) {
-    await vscode.commands.executeCommand('setContext', 'lc.isSolution', isRegistered(editor?.document.uri));
+    const uri = editor?.document?.uri;
+    const isSolution = isRegistered(uri) && Boolean(findOpenDocument(uri));
+    if (isSolution) {
+      selectedUri = uri;
+      try {
+        const q = await store.registered(uri.fsPath);
+        current = { ...q, status: current?.titleSlug === q.titleSlug ? current.status : null };
+      } catch {
+        // Ignore transient read failure
+      }
+    }
+    await vscode.commands.executeCommand('setContext', 'lc.isSolution', isSolution);
     if (dashboard && dashboard.isOpen) dashboard.refresh();
   }
 
@@ -541,7 +699,7 @@ async function createController(vscode, context, dependencies = {}) {
   command('lc.importSession', importSession);
   command('lc.account', async () => { const { user } = await verifiedAuth(); await vscode.window.showInformationMessage(`LeetCode session is valid: ${user}`); });
   command('lc.disconnect', async () => {
-    if (jobs.busy || connecting) throw new LcError('BUSY', 'Finish or stop waiting for the current operation before disconnecting.');
+    if (remoteBusy || jobs.busy || connecting) throw new LcError('BUSY', 'Finish or stop waiting for the current operation before disconnecting.');
     internalSecretWrite = true;
     try {
       await context.secrets.delete(SECRET);
@@ -584,36 +742,15 @@ async function createController(vscode, context, dependencies = {}) {
   command('lc.clearFilters', () => discovery.clearFilters());
   command('lc.nextPage', () => discovery.nextPage());
   command('lc.prevPage', () => discovery.prevPage());
-  command('lc.description', async () => {
-    const q = await selectedProblem();
-    const visible = vscode.window.visibleTextEditors.find(e => isRegistered(e.document.uri));
-    showDescription(q);
-    if (visible && visible.viewColumn === panel.viewColumn) await vscode.window.showTextDocument(visible.document, { viewColumn: vscode.ViewColumn.Beside, preview: false });
-  });
+  command('lc.description', openCurrentDescription);
   command('lc.run', uri => run('test', uri));
   command('lc.submit', uri => run('submit', uri));
   command('lc.runCustom', uri => run('test', uri, true));
-  command('lc.custom', async () => {
-    const q = await selectedProblem();
-    const file = await store.custom(q);
-    const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
-    await vscode.window.showTextDocument(doc, { preview: false });
-    await vscode.window.showInformationMessage('Use LeetCode input format: one argument per line; repeat arguments for additional cases. Return to the solution editor and choose Run Custom Input.');
-  });
+  command('lc.custom', editCustomInput);
   command('lc.resume', resume);
-  command('lc.clearPending', async () => {
-    if (jobs.busy) throw new LcError('BUSY', 'Stop waiting for the current operation first.');
-    const pending = await store.pending();
-    if (!pending) return;
-    const choice = await vscode.window.showWarningMessage('Clearing this record does not cancel execution on LeetCode. If no result ID was saved, first check your submission history. Sending again may duplicate your submission.', { modal: true }, 'Clear Pending Record');
-    if (choice === 'Clear Pending Record') await store.release();
-  });
-  command('lc.results', async () => {
-    const record = await store.readJSON('last-result.json');
-    output.clear();
-    if (record) present(record); else { output.appendLine('No completed remote result saved yet. Use Retrieve Pending Result for an unfinished operation.'); output.show(true); }
-  });
-  command('lc.folder', async () => { await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(store.root)); });
+  command('lc.clearPending', clearPending);
+  command('lc.results', showResults);
+  command('lc.folder', openFolder);
 
   if (typeof vscode.window.registerTreeDataProvider === 'function') {
     context.subscriptions.push(vscode.window.registerTreeDataProvider('lc.explorer', explorer));

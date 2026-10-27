@@ -38,10 +38,10 @@ const G1_ACTIVE_ACTIONS = new Set([
   'removeFilter',
   'clearFilters',
   'loadTopics',
-  'changePage'
+  'changePage',
+  'problemAction'
 ]);
 const PLANNED_ACTIONS = new Set([
-  'problemAction',
   'accountAction'
 ]);
 const VALID_PROBLEM_ACTIONS = new Set([
@@ -87,6 +87,17 @@ const STATUS_LABELS = {
   AC: 'Solved',
   TRIED: 'Attempted',
   NOT_STARTED: 'Not started'
+};
+
+const VERDICTS = {
+  10: 'Accepted',
+  11: 'Wrong Answer',
+  12: 'Memory Limit Exceeded',
+  13: 'Output Limit Exceeded',
+  14: 'Time Limit Exceeded',
+  15: 'Runtime Error',
+  16: 'Internal Error',
+  20: 'Compilation Error'
 };
 
 function isPlainObject(value) {
@@ -301,12 +312,15 @@ function validateDashboardMessage(raw) {
     return { ok: true, action: 'setFilters', payload: { filters: clean } };
   }
 
+  if (action === 'problemAction') {
+    if (!hasOnlyAllowedKeys(raw, new Set(['action', 'type', 'kind'])) || typeof raw.kind !== 'string' || !VALID_PROBLEM_ACTIONS.has(raw.kind)) {
+      return { ok: false, code: 'INVALID_MESSAGE', message: 'Invalid problem action kind.' };
+    }
+    return { ok: true, action: 'problemAction', payload: { kind: raw.kind } };
+  }
+
   if (PLANNED_ACTIONS.has(action)) {
-    if (action === 'problemAction') {
-      if (!hasOnlyAllowedKeys(raw, new Set(['action', 'type', 'kind'])) || typeof raw.kind !== 'string' || !VALID_PROBLEM_ACTIONS.has(raw.kind)) {
-        return { ok: false, code: 'INVALID_MESSAGE', message: 'Invalid problem action kind.' };
-      }
-    } else if (action === 'accountAction') {
+    if (action === 'accountAction') {
       if (!hasOnlyAllowedKeys(raw, new Set(['action', 'type', 'kind'])) || typeof raw.kind !== 'string' || !VALID_ACCOUNT_ACTIONS.has(raw.kind)) {
         return { ok: false, code: 'INVALID_MESSAGE', message: 'Invalid account action kind.' };
       }
@@ -315,7 +329,7 @@ function validateDashboardMessage(raw) {
       ok: false,
       code: 'UNIMPLEMENTED',
       action,
-      message: `Action "${action}" is scheduled for a later OpenGUI task (G3–G4). Use the LeetCode sidebar or editor commands until G3–G4 are completed.`
+      message: `Action "${action}" is scheduled for G4 (Account controls). Use the LeetCode sidebar Account section until G4 is completed.`
     };
   }
 
@@ -355,6 +369,94 @@ function sanitizeQuestionForView(q, isVerified) {
         }))
       : []
   };
+}
+
+function formatResultFieldValue(value) {
+  if (value === undefined || value === null || value === '') return null;
+  if (Array.isArray(value)) {
+    return boundText(value.map(v => (typeof v === 'string' ? v : JSON.stringify(v))).join('\n'), 240);
+  }
+  return boundText(typeof value === 'string' ? value : JSON.stringify(value), 240);
+}
+
+function summarizeResultForView(record) {
+  if (!record || !record.job || !record.result) return null;
+  const { job, result: r } = record;
+  let verdict = r.status_msg || VERDICTS[r.status_code] || 'Unknown verdict';
+  if (job.kind === 'test' && Number(r.status_code) === 10) {
+    verdict = r.correct_answer === true
+      ? 'Passed'
+      : r.correct_answer === false
+        ? 'Wrong Answer'
+        : 'Execution completed (comparison unavailable)';
+  }
+  return {
+    kind: job.kind === 'submit' ? 'submit' : 'test',
+    heading: job.kind === 'submit'
+      ? 'OFFICIAL LEETCODE SUBMISSION'
+      : 'LEETCODE REMOTE TEST — not an official submission',
+    problemNumber: boundText(job.number, 20),
+    problemTitle: boundText(job.title, 120),
+    verdict: boundText(verdict, 80),
+    operationId: job.id ? boundText(job.id, 60) : null,
+    account: job.user ? boundText(job.user, 60) : null,
+    editorVersion: job.version !== undefined ? Number(job.version) : null,
+    runtime: r.status_runtime ? boundText(r.status_runtime, 40) : null,
+    memory: r.status_memory
+      ? boundText(r.status_memory, 40)
+      : (typeof r.memory === 'number' ? `${r.memory} bytes` : null),
+    passed: r.total_correct != null && r.total_testcases != null
+      ? `${r.total_correct}/${r.total_testcases}`
+      : null,
+    actualOutput: formatResultFieldValue(r.code_answer ?? r.output),
+    expectedOutput: formatResultFieldValue(r.expected_code_answer ?? r.expected_output),
+    failingInput: formatResultFieldValue(r.last_testcase ?? r.input_formatted ?? r.input),
+    compileError: formatResultFieldValue(r.full_compile_error ?? r.compile_error),
+    runtimeError: formatResultFieldValue(r.full_runtime_error ?? r.runtime_error),
+    stdout: formatResultFieldValue(r.std_output ?? r.code_output),
+    startedAt: job.startedAt ? boundText(job.startedAt, 40) : null
+  };
+}
+
+function computeActionHint(state) {
+  if (state.busy) {
+    return 'Remote operation in progress on LeetCode… Duplicate runs and submissions are blocked until completion.';
+  }
+  if (state.pendingJob) {
+    return `Pending ${state.pendingJob.kind === 'submit' ? 'submission' : 'remote test'} for ${state.pendingJob.number}. ${state.pendingJob.title}. Use "Retrieve Pending Result" or "Clear Pending Operation" under More Actions before running or submitting again.`;
+  }
+  if (!state.currentProblem) {
+    return 'No problem selected. Click "Open" on any problem in Explore or My Problems to select a C++ solution.';
+  }
+  if (!state.currentProblem.editorOpen) {
+    return `The editor for ${state.currentProblem.fileName || 'this solution'} is closed. Click "Open Code" to reopen the C++ solution before running or submitting.`;
+  }
+  return `Target locked to ${state.currentProblem.fileName || 'registered C++ solution'}${state.currentProblem.dirty ? ' (includes unsaved editor changes)' : ''}. Moving focus to this dashboard will not change the target file.`;
+}
+
+function renderPendingHtml(pendingJob, busy) {
+  if (!pendingJob) return '';
+  const disabledAttr = busy ? ' disabled' : '';
+  return `<div class="lc-status-box" role="status"><span>Pending ${pendingJob.kind === 'submit' ? 'submission' : 'test'}: ${escape(pendingJob.number)}. ${escape(pendingJob.title)}${pendingJob.id ? ' (ID: ' + escape(pendingJob.id) + ')' : ' (unconfirmed ID)'}</span><div class="lc-action-row"><button type="button" class="lc-btn" data-action="problemAction" data-kind="resume"${disabledAttr}>Retrieve Pending Result</button><button type="button" class="lc-btn lc-btn-secondary" data-action="problemAction" data-kind="clearPending"${disabledAttr}>Clear Pending Operation</button></div></div>`;
+}
+
+function renderLastResultHtml(lastResult) {
+  if (!lastResult) return '';
+  const details = [];
+  if (lastResult.runtime) details.push(`Runtime: ${lastResult.runtime}`);
+  if (lastResult.memory) details.push(`Memory: ${lastResult.memory}`);
+  if (lastResult.passed) details.push(`Passed: ${lastResult.passed}`);
+  if (lastResult.editorVersion !== null && lastResult.editorVersion !== undefined) {
+    details.push(`Editor v${lastResult.editorVersion}`);
+  }
+  const extraLines = [];
+  if (lastResult.actualOutput) extraLines.push(`Actual: ${lastResult.actualOutput}`);
+  if (lastResult.expectedOutput) extraLines.push(`Expected: ${lastResult.expectedOutput}`);
+  if (lastResult.failingInput) extraLines.push(`Input: ${lastResult.failingInput}`);
+  if (lastResult.compileError) extraLines.push(`Compiler: ${lastResult.compileError}`);
+  if (lastResult.runtimeError) extraLines.push(`Runtime error: ${lastResult.runtimeError}`);
+
+  return `<div class="lc-status-box" role="region" aria-label="Latest Remote Result"><div class="lc-item-main"><div class="lc-item-title">${escape(lastResult.heading)} · ${escape(lastResult.problemNumber)}. ${escape(lastResult.problemTitle)} — Verdict: ${escape(lastResult.verdict)}</div><div class="lc-item-meta">${escape(details.join(' · '))}</div>${extraLines.length ? `<div class="lc-item-meta">${escape(extraLines.join(' | '))}</div>` : ''}</div></div>`;
 }
 
 function renderActiveFiltersHtml(catalog, account) {
@@ -500,6 +602,10 @@ class LeetCodeDashboard {
     this.discovery = options.discovery;
     this.openProblemBySlug = options.openProblemBySlug;
     this.openLocalProblem = options.openLocalProblem;
+    this.executeProblemAction = options.executeProblemAction;
+    this.isBusy = options.isBusy || (() => false);
+    this.getPendingJob = options.getPendingJob || (async () => undefined);
+    this.getLastResult = options.getLastResult || (async () => undefined);
     this.onError = options.onError;
     this.getLocalProblems = options.getLocalProblems || (async () => []);
     this.getCurrentProblem = options.getCurrentProblem || (async () => undefined);
@@ -627,9 +733,26 @@ class LeetCodeDashboard {
       current = undefined;
     }
 
+    let pending = undefined;
+    try {
+      pending = await this.getPendingJob();
+    } catch {
+      pending = undefined;
+    }
+
+    let rawResult = undefined;
+    try {
+      rawResult = await this.getLastResult();
+    } catch {
+      rawResult = undefined;
+    }
+
+    const busy = Boolean(this.isBusy());
+
     return {
-      phase: 'G2',
+      phase: 'G3',
       destination: VALID_DESTINATIONS.has(this.destination) ? this.destination : 'explore',
+      busy,
       notice: this.notice ? { kind: this.notice.kind, code: this.notice.code, message: boundText(this.notice.message, 240) } : null,
       account: {
         kind: acct.kind || 'signed_out',
@@ -644,9 +767,24 @@ class LeetCodeDashboard {
             title: boundText(current.title, 120),
             titleSlug: boundText(current.titleSlug, 120),
             difficulty: boundText(current.difficulty, 20),
-            fileName: current.fileName ? boundText(current.fileName, 120) : null
+            fileName: current.fileName ? boundText(current.fileName, 120) : null,
+            editorOpen: current.editorOpen !== false,
+            dirty: Boolean(current.dirty),
+            enableRunCode: current.enableRunCode !== false
           }
         : null,
+      pendingJob: pending && pending.slug
+        ? {
+            kind: pending.kind === 'submit' ? 'submit' : 'test',
+            id: pending.id ? boundText(pending.id, 60) : null,
+            slug: boundText(pending.slug, 120),
+            title: boundText(pending.title, 120),
+            number: boundText(pending.number, 20),
+            user: boundText(pending.user, 60),
+            startedAt: boundText(pending.startedAt, 40)
+          }
+        : null,
+      lastResult: summarizeResultForView(rawResult),
       daily: {
         status: daily.status || 'idle',
         stale: Boolean(daily.stale),
@@ -931,6 +1069,17 @@ class LeetCodeDashboard {
         await this.refresh();
         return { ok: true, action: 'changePage', direction, skip: this.discovery?.skip || 0 };
       }
+
+      if (validated.action === 'problemAction') {
+        const { kind } = validated.payload;
+        if (typeof this.executeProblemAction !== 'function') {
+          throw new LcError('UNSUPPORTED', 'Problem actions are not configured.');
+        }
+        this.notice = null;
+        await this.executeProblemAction(kind);
+        await this.refresh();
+        return { ok: true, action: 'problemAction', kind };
+      }
     } catch (error) {
       return this._reportActionError(error, 'The dashboard action could not be completed.');
     }
@@ -956,8 +1105,13 @@ class LeetCodeDashboard {
       ? `${current.questionFrontendId}. ${current.title} (${current.difficulty})`
       : 'No problem selected';
     const currentFile = current
-      ? (current.fileName || 'Registered C++ solution')
+      ? `${current.fileName || 'Registered C++ solution'}${current.dirty ? ' (unsaved edits)' : ''}${!current.editorOpen ? ' (editor closed)' : ''}`
       : 'Open a problem from Explore or My Problems below to select a C++ solution.';
+
+    const canOpenProblemDocs = Boolean(current);
+    const canExecuteSolution = Boolean(current && current.editorOpen && !state.busy && !state.pendingJob);
+    const canRunTests = Boolean(canExecuteSolution && current.enableRunCode !== false);
+    const canManagePending = Boolean(state.pendingJob && !state.busy);
 
     const noticeHtml = state.notice?.message
       ? `<div id="lc-notice-region"><div class="lc-notice${state.notice.kind === 'error' ? ' lc-notice-error' : state.notice.kind === 'warning' ? ' lc-notice-warning' : ''}" role="${state.notice.kind === 'error' ? 'alert' : 'status'}"><span>${escape(state.notice.message)}</span><button type="button" class="lc-btn lc-btn-secondary" data-action="dismissNotice">Dismiss</button></div></div>`
@@ -981,7 +1135,7 @@ class LeetCodeDashboard {
     <header class="lc-header">
       <div class="lc-title-group">
         <h1 class="lc-title">LeetCode Dashboard</h1>
-        <p class="lc-subtitle">Unified C++ problem discovery and local solutions</p>
+        <p class="lc-subtitle">Unified C++ problem discovery, local solutions, and remote execution</p>
       </div>
       <div class="lc-action-row">
         <span id="lc-account-summary-pill" class="lc-account-pill" aria-label="Account connection state">${escape(state.account.summary)}</span>
@@ -998,22 +1152,25 @@ class LeetCodeDashboard {
         <span id="lc-current-problem-file" class="lc-current-file">${escape(currentFile)}</span>
       </div>
       <div class="lc-action-row" role="group" aria-label="Current Problem Actions">
-        <button type="button" class="lc-btn lc-btn-secondary" disabled title="Planned in G3: Open Code editor action.">Open Code (G3)</button>
-        <button type="button" class="lc-btn lc-btn-secondary" disabled title="Planned in G3: View Problem Description.">View Description (G3)</button>
-        <button type="button" class="lc-btn lc-btn-secondary" disabled title="Planned in G3: Run Examples on LeetCode.">Run Examples (G3)</button>
-        <button type="button" class="lc-btn lc-btn-secondary" disabled title="Planned in G3: Edit and run Custom Input.">Custom Input (G3)</button>
-        <button type="button" class="lc-btn lc-btn-secondary" disabled title="Planned in G3: Submit C++ solution to LeetCode.">Submit (G3)</button>
-        <button type="button" class="lc-btn lc-btn-secondary" disabled title="Planned in G3: Show saved remote results.">Results (G3)</button>
+        <button type="button" id="lc-action-openCode" class="lc-btn lc-btn-secondary" data-action="problemAction" data-kind="openCode" data-focus-key="action:openCode"${canOpenProblemDocs ? '' : ' disabled'} title="${canOpenProblemDocs ? 'Open or reveal the registered C++ solution editor' : 'Select a problem first'}">Open Code</button>
+        <button type="button" id="lc-action-description" class="lc-btn lc-btn-secondary" data-action="problemAction" data-kind="description" data-focus-key="action:description"${canOpenProblemDocs ? '' : ' disabled'} title="${canOpenProblemDocs ? 'Show problem description' : 'Select a problem first'}">View Description</button>
+        <button type="button" id="lc-action-run" class="lc-btn" data-action="problemAction" data-kind="run" data-focus-key="action:run"${canRunTests ? '' : ' disabled'} title="${canRunTests ? 'Run example testcases on LeetCode using the selected C++ buffer' : 'Requires an open selected C++ solution editor and no pending operation'}">Run Examples</button>
+        <button type="button" id="lc-action-customInput" class="lc-btn lc-btn-secondary" data-action="problemAction" data-kind="customInput" data-focus-key="action:customInput"${canOpenProblemDocs ? '' : ' disabled'} title="${canOpenProblemDocs ? 'Edit custom test input file for the selected problem' : 'Select a problem first'}">Edit Custom Input</button>
+        <button type="button" id="lc-action-runCustom" class="lc-btn lc-btn-secondary" data-action="problemAction" data-kind="runCustom" data-focus-key="action:runCustom"${canRunTests ? '' : ' disabled'} title="${canRunTests ? 'Run custom test input on LeetCode using the selected C++ buffer' : 'Requires an open selected C++ solution editor and no pending operation'}">Run Custom Input</button>
+        <button type="button" id="lc-action-submit" class="lc-btn" data-action="problemAction" data-kind="submit" data-focus-key="action:submit"${canExecuteSolution ? '' : ' disabled'} title="${canExecuteSolution ? 'Submit selected C++ solution to LeetCode' : 'Requires an open selected C++ solution editor and no pending operation'}">Submit</button>
+        <button type="button" id="lc-action-results" class="lc-btn lc-btn-secondary" data-action="problemAction" data-kind="results" data-focus-key="action:results" title="Show last completed remote result">Results</button>
         <details class="lc-details">
           <summary>More Actions</summary>
           <div class="lc-more-menu">
-            <button type="button" class="lc-btn lc-btn-secondary" disabled title="Planned in G3/G4: Retrieve Pending Result.">Retrieve Pending Result (G3)</button>
-            <button type="button" class="lc-btn lc-btn-secondary" disabled title="Planned in G3/G4: Clear Pending Operation.">Clear Pending Operation (G3)</button>
-            <button type="button" class="lc-btn lc-btn-secondary" disabled title="Planned in G3/G4: Open Local Solutions Folder.">Open Solutions Folder (G4)</button>
+            <button type="button" id="lc-action-resume" class="lc-btn lc-btn-secondary" data-action="problemAction" data-kind="resume" data-focus-key="action:resume"${canManagePending ? '' : ' disabled'} title="${canManagePending ? 'Retrieve result of pending operation without resending code' : 'No pending operation to retrieve'}">Retrieve Pending Result</button>
+            <button type="button" id="lc-action-clearPending" class="lc-btn lc-btn-secondary" data-action="problemAction" data-kind="clearPending" data-focus-key="action:clearPending"${canManagePending ? '' : ' disabled'} title="${canManagePending ? 'Clear pending operation lock after checking submission history' : 'No pending operation to clear'}">Clear Pending Operation</button>
+            <button type="button" id="lc-action-folder" class="lc-btn lc-btn-secondary" data-action="problemAction" data-kind="folder" data-focus-key="action:folder" title="Reveal local C++ solutions folder">Open Solutions Folder</button>
           </div>
         </details>
       </div>
-      <p class="lc-muted">Solution execution and editor actions are scheduled for G3. Use the editor title buttons, CodeLens, or sidebar until G3 is completed.</p>
+      <p id="lc-current-action-hint" class="lc-muted">${escape(computeActionHint(state))}</p>
+      <div id="lc-pending-region">${renderPendingHtml(state.pendingJob, state.busy)}</div>
+      <div id="lc-result-region">${renderLastResultHtml(state.lastResult)}</div>
     </section>
 
     ${noticeHtml}
@@ -1130,5 +1287,6 @@ module.exports = {
   G1_ACTIVE_ACTIONS,
   PLANNED_ACTIONS,
   validateDashboardMessage,
-  serializeStateForHtml
+  serializeStateForHtml,
+  summarizeResultForView
 };

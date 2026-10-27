@@ -15,6 +15,7 @@ function fakeVSCode() {
   const handlers=new Map();
   const errors=[], logs=[], infos=[], inputs=[], picks=[], panels=[], treeProviders=new Map();
   const documents=[];
+  const activeEditorListeners=[];
   const Uri={file:file=>({scheme:'file',fsPath:file,toString:()=>`file://${file}`}),parse:value=>({toString:()=>value})};
   const vscode={Uri,StatusBarAlignment:{Left:1},ViewColumn:{One:1,Beside:-2},ProgressLocation:{Notification:15},
     TreeItemCollapsibleState:{None:0,Collapsed:1,Expanded:2},
@@ -33,13 +34,14 @@ function fakeVSCode() {
     },
     workspace:{textDocuments:documents,async openTextDocument(uri){
       let doc=documents.find(d=>d.uri.toString()===uri.toString());
-      if(!doc){doc={uri,version:1,isDirty:false,text:await fs.readFile(uri.fsPath,'utf8'),getText(){return this.text;}};documents.push(doc);}
+      if(!doc){doc={uri,version:1,isDirty:false,isClosed:false,text:await fs.readFile(uri.fsPath,'utf8'),getText(){return this.text;}};documents.push(doc);}
+      else{doc.isClosed=false;}
       return doc;
     }},
     window:{activeTextEditor:undefined,visibleTextEditors:[],
       createOutputChannel(){return {appendLine:s=>logs.push(s),show(){},clear(){logs.length=0;},dispose(){}};},
       createStatusBarItem(){return {show(){},dispose(){}};},
-      onDidChangeActiveTextEditor(){return disposable();},
+      onDidChangeActiveTextEditor(fn){activeEditorListeners.push(fn);return disposable();},
       registerTreeDataProvider(id,provider){treeProviders.set(id,provider);return disposable();},
       async showErrorMessage(s){errors.push(s);},
       async showInformationMessage(s,...rest){infos.push(s);return rest.length?undefined:undefined;},
@@ -96,7 +98,13 @@ function fakeVSCode() {
         panels.push(p);
         return p;
       },
-      async showTextDocument(document,opts={}){const e={document,viewColumn:opts.viewColumn===-2?2:opts.viewColumn||2};this.activeTextEditor=e;this.visibleTextEditors=[e];return e;}
+      async showTextDocument(document,opts={}){
+        const e={document,viewColumn:opts.viewColumn===-2?2:opts.viewColumn||2};
+        this.activeTextEditor=e;
+        this.visibleTextEditors=[e];
+        for(const fn of activeEditorListeners)await fn(e);
+        return e;
+      }
     },
     languages:{registerCodeLensProvider(_,provider){vscode.provider=provider;return disposable();}},
     env:{async openExternal(){return true;}}
@@ -725,9 +733,9 @@ test('G1: dashboard enforces strict CSP, loads bundled assets, escapes untrusted
   assert.ok(!serializedMessages.includes('secret-csrf-value-888'));
   assert.equal('auth' in f.controller.dashboard.lastState.account,false);
 
-  // Active G2 actions and honest G3-G4 planned labels are present.
+  // Active G2/G3 actions and honest G4 planned labels are present.
   assert.match(html,/Open Daily Challenge/);
-  assert.match(html,/Run Examples \(G3\)/);
+  assert.match(html,/Run Examples/);
   assert.match(html,/Advanced: Import Session \(G4\)/);
 });
 
@@ -774,11 +782,11 @@ test('G1: dashboard message bridge validates allowlisted actions, surfaces loadi
     assert.equal(f.controller.dashboard.lastState.destination,dest);
   }
 
-  // Valid-shaped G3-G4 actions return honest UNIMPLEMENTED status and set a dismissible notice.
-  const [unimpl]=await panel.emitMessage({action:'problemAction',kind:'run'});
+  // Valid-shaped G4 actions return honest UNIMPLEMENTED status and set a dismissible notice.
+  const [unimpl]=await panel.emitMessage({action:'accountAction',kind:'openSignIn'});
   assert.equal(unimpl.ok,false);
   assert.equal(unimpl.code,'UNIMPLEMENTED');
-  assert.match(f.controller.dashboard.lastState.notice.message,/scheduled for a later OpenGUI task \(G3–G4\)/);
+  assert.match(f.controller.dashboard.lastState.notice.message,/scheduled for G4/i);
 
   const [dismissRes]=await panel.emitMessage({action:'dismissNotice'});
   assert.equal(dismissRes.ok,true);
@@ -917,6 +925,9 @@ test('G2: dashboard search, difficulty, multi-topic, progress filters, removable
   const catalogVariables=[];
   let failDaily=false;
   let resolveDelayedCatalog;
+  let markDelayedCatalogEntered;
+  const delayedCatalogEntered=new Promise(r=>{markDelayedCatalogEntered=r;});
+  const delayedCatalogGate=new Promise(r=>{resolveDelayedCatalog=r;});
   let delayNextCatalog=false;
 
   const f=await fixture(t,async(_p,o)=>{
@@ -937,7 +948,8 @@ test('G2: dashboard search, difficulty, multi-topic, progress filters, removable
       catalogVariables.push(variables);
       if(delayNextCatalog){
         delayNextCatalog=false;
-        await new Promise(r=>{resolveDelayedCatalog=r;});
+        markDelayedCatalogEntered();
+        await delayedCatalogGate;
         return {data:{problemsetQuestionList:{total:1,questions:[{...q,title:'Stale Delayed Result',titleSlug:'stale-result'}]}}};
       }
       return {data:{problemsetQuestionList:{
@@ -1003,6 +1015,7 @@ test('G2: dashboard search, difficulty, multi-topic, progress filters, removable
   // Stale out-of-order catalog response cannot overwrite newer difficulty filter selection.
   delayNextCatalog=true;
   const stalePromise=panel.emitMessage({action:'setFilters',filters:{difficulty:'EASY'}});
+  await delayedCatalogEntered;
   const freshPromise=panel.emitMessage({action:'setFilters',filters:{difficulty:'HARD'}});
   await freshPromise;
   resolveDelayedCatalog();
@@ -1022,6 +1035,255 @@ test('G2: dashboard search, difficulty, multi-topic, progress filters, removable
   assert.match(f.controller.dashboard.lastState.daily.error,/Daily refresh timed out/);
   assert.equal(panel.htmlWriteCount,1);
 });
+
+test('G3: dashboard Current Problem actions target the selected solution when webview is focused, capture unsaved C++ and custom input edits, and reject closed or missing targets without running another open file', async t=>{
+  const requests=[];
+  const q2={
+    questionId:'202',
+    questionFrontendId:'2',
+    title:'Add Two Numbers',
+    titleSlug:'add-two-numbers',
+    difficulty:'Medium',
+    isPaidOnly:false,
+    status:null,
+    topicTags:[{name:'Linked List',slug:'linked-list'}],
+    content:'<p>Add Two Numbers</p>',
+    codeSnippets:[{langSlug:'cpp',code:'class Solution { /* starter 2 */ };'}],
+    exampleTestcases:'[2,4,3]\n[5,6,4]',
+    enableRunCode:true
+  };
+
+  const f=await fixture(t,async(p,o)=>{
+    requests.push([p,o]);
+    if(p==='/graphql/'){
+      const {query,variables}=o.body;
+      if(query.includes('userStatus'))return {data:{userStatus:{isSignedIn:true,username:'alice'}}};
+      if(query.includes('activeDailyCodingChallengeQuestion'))return {data:{activeDailyCodingChallengeQuestion:{date:'2026-10-27',link:'/problems/two-sum/',question:q}}};
+      if(query.includes('problemsetQuestionList'))return {data:{problemsetQuestionList:{total:2,questions:[q,q2]}}};
+      if(query.includes('questionData')&&variables.titleSlug==='add-two-numbers')return {data:{question:q2}};
+      throw new Error('unexpected graphql query');
+    }
+    if(p.includes('interpret_solution'))return {interpret_id:'runcode_g3_1'};
+    if(p.endsWith('/submit/'))return {submission_id:701};
+    if(p.endsWith('/check/'))return {state:'SUCCESS',status_code:10,status_msg:'Accepted',correct_answer:true,code_answer:['[0,1]'],expected_code_answer:['[0,1]'],status_runtime:'2 ms',status_memory:'10 MB'};
+    throw new Error('unexpected endpoint');
+  });
+
+  // Also cache and open a second registered solution in textDocuments so we can prove closing the active target never falls back to another open solution.
+  const file2=await f.store.cache(q2);
+  const doc2=await f.vscode.workspace.openTextDocument(f.vscode.Uri.file(file2));
+  doc2.text='class Solution { /* problem 2 buffer */ };';
+  // Re-select problem 1 (Two Sum) as the active solution before focusing the dashboard webview.
+  await f.vscode.window.showTextDocument(f.doc);
+  f.doc.text='class Solution { /* unsaved problem 1 edits */ };';
+  f.doc.version=4;
+  f.doc.isDirty=true;
+
+  const panel=await f.handlers.get('lc.openGUI')();
+  await f.controller.discovery.refreshAll();
+  await f.controller.dashboard.refresh();
+  assert.equal(panel.htmlWriteCount,1);
+
+  // Simulate moving focus to the dashboard webview (activeTextEditor becomes undefined).
+  f.vscode.window.activeTextEditor=undefined;
+  await f.controller.dashboard.refresh();
+  assert.equal(f.controller.dashboard.lastState.currentProblem.titleSlug,'two-sum');
+  assert.equal(f.controller.dashboard.lastState.currentProblem.fileName,'1.two-sum.cpp');
+  assert.equal(f.controller.dashboard.lastState.currentProblem.editorOpen,true);
+  assert.equal(f.controller.dashboard.lastState.currentProblem.dirty,true);
+
+  // Clicking Run Examples in dashboard while activeTextEditor is undefined targets problem 1 and sends its unsaved buffer.
+  const [runRes]=await panel.emitMessage({action:'problemAction',kind:'run'});
+  assert.deepEqual(runRes,{ok:true,action:'problemAction',kind:'run'});
+  const interpretReq1=requests.find(([p])=>p.includes('/problems/two-sum/interpret_solution/'));
+  assert.ok(interpretReq1);
+  assert.equal(interpretReq1[1].body.question_id,'101');
+  assert.equal(interpretReq1[1].body.typed_code,'class Solution { /* unsaved problem 1 edits */ };');
+  assert.equal(interpretReq1[1].body.data_input,'[2,7]\n9');
+  assert.equal(f.controller.dashboard.lastState.lastResult.verdict,'Passed');
+  assert.equal(f.controller.dashboard.lastState.lastResult.kind,'test');
+  assert.equal(f.controller.dashboard.lastState.lastResult.editorVersion,4);
+
+  // Clicking Edit Custom Input opens the custom input editor (changing activeTextEditor to non-solution custom file),
+  // yet Run Custom Input from the dashboard still targets problem 1's solution + unsaved custom input buffer.
+  const [customRes]=await panel.emitMessage({action:'problemAction',kind:'customInput'});
+  assert.deepEqual(customRes,{ok:true,action:'problemAction',kind:'customInput'});
+  const customDoc=f.vscode.window.activeTextEditor.document;
+  assert.match(customDoc.uri.fsPath,/1\.two-sum\.cpp\.input\.txt$/);
+  customDoc.text='[3,3]\n6';
+  customDoc.isDirty=true;
+  // Webview focus again:
+  f.vscode.window.activeTextEditor=undefined;
+
+  requests.length=0;
+  const [runCustomRes]=await panel.emitMessage({action:'problemAction',kind:'runCustom'});
+  assert.deepEqual(runCustomRes,{ok:true,action:'problemAction',kind:'runCustom'});
+  const interpretReq2=requests.find(([p])=>p.includes('/problems/two-sum/interpret_solution/'));
+  assert.ok(interpretReq2);
+  assert.equal(interpretReq2[1].body.typed_code,'class Solution { /* unsaved problem 1 edits */ };');
+  assert.equal(interpretReq2[1].body.data_input,'[3,3]\n6');
+
+  // Switching problems via dashboard updates currentProblem and targets the newly selected problem on Submit.
+  const [switchRes]=await panel.emitMessage({action:'openLocal',titleSlug:'add-two-numbers'});
+  assert.equal(switchRes.ok,true);
+  assert.equal(f.controller.dashboard.lastState.currentProblem.titleSlug,'add-two-numbers');
+  assert.equal(f.controller.dashboard.lastState.currentProblem.fileName,'2.add-two-numbers.cpp');
+  f.vscode.window.activeTextEditor=undefined; // Focus moves back to webview
+
+  requests.length=0;
+  const [submitRes]=await panel.emitMessage({action:'problemAction',kind:'submit'});
+  assert.deepEqual(submitRes,{ok:true,action:'problemAction',kind:'submit'});
+  const submitReq=requests.find(([p])=>p.endsWith('/problems/add-two-numbers/submit/'));
+  assert.ok(submitReq);
+  assert.equal(submitReq[1].body.question_id,'202');
+  assert.equal(submitReq[1].body.typed_code,'class Solution { /* problem 2 buffer */ };');
+  assert.equal(f.controller.dashboard.lastState.lastResult.kind,'submit');
+  assert.equal(f.controller.dashboard.lastState.lastResult.problemNumber,'2');
+  assert.equal(f.controller.dashboard.lastState.lastResult.problemTitle,'Add Two Numbers');
+
+  // Closing the selected solution editor (doc2.isClosed = true) while doc1 is still open in textDocuments
+  // must block Run/Submit with SELECTION rather than running doc1.
+  doc2.isClosed=true;
+  f.vscode.window.activeTextEditor=undefined;
+  await f.controller.dashboard.refresh();
+  assert.equal(f.controller.dashboard.lastState.currentProblem.editorOpen,false);
+
+  requests.length=0;
+  const [closedRunRes]=await panel.emitMessage({action:'problemAction',kind:'run'});
+  assert.equal(closedRunRes.ok,false);
+  assert.equal(closedRunRes.code,'SELECTION');
+  assert.match(f.controller.dashboard.lastState.notice.message,/closed.*Open Code/i);
+  assert.equal(requests.length,0);
+
+  // Clicking Open Code in dashboard reopens the closed solution editor and restores Run/Submit capability.
+  const [reopenRes]=await panel.emitMessage({action:'problemAction',kind:'openCode'});
+  assert.deepEqual(reopenRes,{ok:true,action:'problemAction',kind:'openCode'});
+  assert.equal(doc2.isClosed,false);
+  assert.equal(f.controller.dashboard.lastState.currentProblem.editorOpen,true);
+  assert.equal(panel.htmlWriteCount,1);
+});
+
+test('G3: dashboard prevents duplicate requests while busy, surfaces pending job lock, retrieves pending result without resending code, clears pending lock, and opens description/results/folder', async t=>{
+  let releaseCheck;
+  let markCheckEntered;
+  const checkEntered=new Promise(r=>{markCheckEntered=r;});
+  const checkGate=new Promise(r=>{releaseCheck=r;});
+  let blockCheck=true;
+  let submitCount=0;
+  let revealedFolder=null;
+  let warningChoice='Clear Pending Record';
+
+  const f=await fixture(t,async(p,o)=>{
+    if(p==='/graphql/'){
+      const {query}=o.body;
+      if(query.includes('userStatus'))return {data:{userStatus:{isSignedIn:true,username:'alice'}}};
+      if(query.includes('activeDailyCodingChallengeQuestion'))return {data:{activeDailyCodingChallengeQuestion:{date:'2026-10-27',link:'/problems/two-sum/',question:q}}};
+      if(query.includes('problemsetQuestionList'))return {data:{problemsetQuestionList:{total:1,questions:[q]}}};
+    }
+    if(p.endsWith('/submit/')){
+      submitCount++;
+      return {submission_id:909};
+    }
+    if(p.endsWith('/check/')){
+      if(blockCheck){
+        markCheckEntered();
+        await checkGate;
+      }
+      return {state:'SUCCESS',status_code:10,status_msg:'Accepted',status_runtime:'4 ms',status_memory:'11 MB'};
+    }
+    throw new Error('unexpected endpoint');
+  });
+
+  f.vscode.window.showWarningMessage=async()=>warningChoice;
+  f.vscode.commands.registerCommand('revealFileInOS',uri=>{revealedFolder=uri.fsPath;});
+
+  const panel=await f.handlers.get('lc.openGUI')();
+  await f.controller.discovery.refreshAll();
+  await f.controller.dashboard.refresh();
+
+  // Start a submission that waits in /check/, and try a duplicate run/submit from the dashboard while busy.
+  const inflightSubmit=panel.emitMessage({action:'problemAction',kind:'submit'});
+  await checkEntered;
+  await f.controller.dashboard.refresh();
+  assert.equal(f.controller.dashboard.lastState.busy,true);
+
+  const [dupRes]=await panel.emitMessage({action:'problemAction',kind:'run'});
+  assert.equal(dupRes.ok,false);
+  assert.equal(dupRes.code,'BUSY');
+  assert.equal(submitCount,1);
+
+  // Release the in-flight check and confirm completion clears busy state.
+  releaseCheck();
+  const [firstSubmitRes]=await inflightSubmit;
+  assert.equal(firstSubmitRes.ok,true);
+  assert.equal(f.controller.dashboard.lastState.busy,false);
+  assert.equal(f.controller.dashboard.lastState.lastResult.verdict,'Accepted');
+
+  // Simulate an interrupted pending submission stored on disk; dashboard surfaces pendingJob and blocks new Submit until resolved.
+  await f.store.acquire({
+    token:'22222222-2222-2222-2222-222222222222',
+    kind:'submit',
+    id:'910',
+    slug:'two-sum',
+    title:'Two Sum',
+    number:'1',
+    user:'alice',
+    file:f.file,
+    version:1,
+    hash:'abc',
+    startedAt:'2026-10-27T01:00:00Z'
+  });
+  await f.controller.dashboard.refresh();
+  assert.ok(f.controller.dashboard.lastState.pendingJob);
+  assert.equal(f.controller.dashboard.lastState.pendingJob.id,'910');
+
+  // Retrieve Pending Result ('resume') polls /check/ without calling /submit/ again and clears the pending lock.
+  blockCheck=false;
+  const submitsBeforeResume=submitCount;
+  const [resumeRes]=await panel.emitMessage({action:'problemAction',kind:'resume'});
+  assert.deepEqual(resumeRes,{ok:true,action:'problemAction',kind:'resume'});
+  assert.equal(submitCount,submitsBeforeResume);
+  assert.equal(f.controller.dashboard.lastState.pendingJob,null);
+  assert.equal(f.controller.dashboard.lastState.lastResult.verdict,'Accepted');
+
+  // Acquire another pending lock without remote id and test Clear Pending Operation ('clearPending').
+  await f.store.acquire({
+    token:'33333333-3333-3333-3333-333333333333',
+    kind:'test',
+    slug:'two-sum',
+    title:'Two Sum',
+    number:'1',
+    user:'alice',
+    file:f.file,
+    version:1,
+    hash:'def',
+    startedAt:'2026-10-27T02:00:00Z'
+  });
+  await f.controller.dashboard.refresh();
+  assert.equal(f.controller.dashboard.lastState.pendingJob.id,null);
+
+  const [clearRes]=await panel.emitMessage({action:'problemAction',kind:'clearPending'});
+  assert.deepEqual(clearRes,{ok:true,action:'problemAction',kind:'clearPending'});
+  assert.equal(await f.store.pending(),undefined);
+  assert.equal(f.controller.dashboard.lastState.pendingJob,null);
+
+  // View Description ('description'), Results ('results'), and Open Solutions Folder ('folder') work via shared flows.
+  const [descRes]=await panel.emitMessage({action:'problemAction',kind:'description'});
+  assert.deepEqual(descRes,{ok:true,action:'problemAction',kind:'description'});
+  const descPanel=f.panels.find(p=>p.viewType==='lc.problem');
+  assert.ok(descPanel);
+  assert.equal(descPanel.options.enableScripts,false);
+
+  const [resultsRes]=await panel.emitMessage({action:'problemAction',kind:'results'});
+  assert.deepEqual(resultsRes,{ok:true,action:'problemAction',kind:'results'});
+  assert.match(f.logs.join('\n'),/OFFICIAL LEETCODE SUBMISSION/);
+
+  const [folderRes]=await panel.emitMessage({action:'problemAction',kind:'folder'});
+  assert.deepEqual(folderRes,{ok:true,action:'problemAction',kind:'folder'});
+  assert.equal(revealedFolder,f.store.root);
+  assert.equal(panel.htmlWriteCount,1);
+});
+
 
 
 
