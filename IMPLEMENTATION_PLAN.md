@@ -233,3 +233,161 @@ Architecture review: GO for T1, with the following acceptance clarifications:
 - [x] T2 implemented and output verified: 31 tests passed, baseline symlink EPERM remains; desktop rendering not yet verified.
 - [x] T3 implemented and output verified: 35 tests passed, baseline symlink EPERM remains; browser sign-in/session import separation and account lifecycle regression cases covered.
 - [x] T4 implemented and final output validation completed: 37 tests passed, 1 explicit Windows symlink skip, syntax/view/package checks passed, live anonymous smoke passed on 2026-10-27, and 0.2.0 VSIX/source ZIP built in dist. Desktop and authenticated account acceptance remain manual.
+
+## Next phase: unified OpenGUI dashboard
+
+Planned: 2026-10-27. Baseline: 0.2.0, `69e0108`.
+Status: planning only; implementation has not been authorized for this phase.
+
+### Outcome and scope
+
+Run `LeetCode: OpenGUI` (`lc.openGUI`) once to open an editor tab containing a
+click-driven dashboard. The current manifest exposes 28 commands; users should
+not have to search that list to discover or operate the extension.
+
+Use VS Code's built-in WebviewPanel with HTML, CSS and JavaScript bundled in the
+extension. Updating this extension is sufficient: no additional extension,
+framework, runtime installation, CDN, browser companion or local server is needed.
+The dashboard uses existing API and controller capabilities. Automatic login and
+browser-session transfer remain deferred under the authentication boundary above.
+
+Platform reference: https://code.visualstudio.com/api/extension-guides/webview
+
+### Interaction design
+
+The dashboard has three destinations:
+
+1. **Explore**: dated Daily Challenge; search by title/number; difficulty, multi-topic
+   and verified-account progress filters; removable filter selections and reset;
+   a paged problem list with number, title, difficulty, progress, premium/access
+   indicators and an Open action.
+2. **My Problems**: saved local solutions with open actions, usable offline. Local
+   availability must remain distinct from remotely solved status.
+3. **Account**: explicit connection state, official sign-in, check saved session,
+   disconnect, and a separately labeled Advanced: Import Session action. Continue
+   using native masked input dialogs for credentials; do not collect them in HTML.
+
+A visible current-problem area identifies the selected problem and solution file,
+with Open Code, View Description, Run Examples, Custom Input, Submit and Results.
+Custom Input exposes editing and running the custom test. Less frequent actions,
+including Retrieve Pending Result, Clear Pending Operation and Open Solutions
+Folder, live under More Actions. Explain unavailable actions and how to enable
+them; do not leave unexplained disabled buttons.
+
+Opening the command again reveals the existing dashboard. Preserve non-sensitive
+navigation/filter state when practical. Support VS Code light/dark/high-contrast
+themes, keyboard navigation, accessible labels and narrow editor widths.
+Show loading, empty, offline, expired-session, error and retry states explicitly.
+
+Keep the sidebar available and synchronized. Hide internal button-only commands
+from the Command Palette while preserving registered command IDs and useful direct
+shortcuts. Opening GUI must not trigger a submission or account verification by itself.
+
+### Architecture and invariants
+
+- Add a dedicated dashboard panel/controller and bundled assets. Share discovery,
+  account state and business actions with the existing sidebar; do not create an
+  independent API client, duplicate catalog state or background polling loop.
+- Load discovery on explicit GUI use and reuse existing in-memory state. Search
+  on Enter or an explicit Search action; avoid a request on every keystroke.
+- The dashboard must display and retain an explicit selected problem/file. Moving
+  focus from a code editor to a webview must not change which solution Run/Submit
+  targets. Revalidate the registered solution URI and read its current editor
+  document, including unsaved changes, when an action executes. If no valid target
+  exists, require selection instead of guessing from the active tab.
+- Preserve existing pending-job locks, no automatic resubmission, no-overwrite
+  storage behavior and account/request generation guards. Block duplicate actions
+  while busy; completed submissions refresh shared progress without making a
+  successful submission fail if the refresh fails.
+- Route webview messages through a bounded, validated allowlist of actions and
+  payloads. Never accept arbitrary command IDs, paths or URLs for execution.
+- Keep credentials in extension-host SecretStorage. Send only presentation state
+  to the webview, never cookies, CSRF tokens, auth headers or raw transport errors.
+- Use a restrictive content security policy, bundled scripts/styles and restricted
+  localResourceRoots. Render remote labels as text, not executable HTML. Keep
+  enableCommandUris disabled and the existing description webview script-free.
+- Dispose panel listeners/subscriptions correctly. Reopening or revealing the GUI
+  must not accumulate event handlers, duplicate requests or restore stale account
+  progress after disconnect/account replacement.
+
+### Work packages and acceptance gates
+
+Implement sequentially after a separate implementation instruction. Antigravity
+owns implementation; the parent Sol session verifies returned output and performs
+only necessary targeted checks. Do not spawn review agents or repeat architecture
+reviews. Return work only for concrete defects or unmet acceptance criteria.
+After each verified task, commit its scoped changes and push before starting the
+next task. The commit subjects below are suggested professional messages.
+
+#### G1 - Dashboard shell and action bridge
+
+Scope: command/manifest registration, single-panel lifecycle, three destinations,
+theme-aware bundled assets, loading/error presentation and validated message bridge.
+
+Acceptance: OpenGUI opens or reveals one tab; closing/reopening works; unknown or
+malformed actions are rejected; disposal does not leave duplicate handlers; the
+GUI loads using only bundled resources. Cover lifecycle and message validation.
+
+Commit: `feat: add unified LeetCode dashboard shell`
+
+#### G2 - Problem discovery and local solutions
+
+Scope: Daily, search, filters, pagination and local problem list wired to shared
+discovery state and the existing open-by-slug/local-open flows.
+
+Acceptance: anonymous users can select/open problems entirely by click; filters
+and pages agree with the sidebar; delayed responses cannot overwrite newer state;
+Daily errors retain explicit date/stale information; offline local reopening
+preserves files. Test these transitions with deterministic fixtures.
+
+Commit: `feat: add dashboard problem browsing and filters`
+
+#### G3 - Current-problem actions and results
+
+Scope: explicit problem/file selection; open code/description; examples, custom
+input, submit, result display and pending-operation actions through shared logic.
+
+Acceptance: after focus moves to the GUI, Run/Submit still uses the displayed
+solution and its unsaved contents. Switching problems, closing editors or having
+no valid target cannot run the wrong file. Duplicate requests remain blocked;
+pending results can be retrieved without resubmission. Test with fake transport;
+do not perform real account submissions without explicit authorization.
+
+Commit: `feat: add dashboard solution actions and results`
+
+#### G4 - Account controls and command discoverability
+
+Scope: account destination, advanced import entry, contextual action availability,
+More Actions and hiding internal-only entries from the Command Palette.
+
+Acceptance: account changes update both surfaces and discard stale progress;
+browser sign-in alone never implies connection; credentials never enter webview
+state/messages; failed imports preserve previous credentials. Existing command
+IDs and useful shortcuts remain functional, including editor Run/Submit actions.
+
+Commit: `feat: unify dashboard account controls and command navigation`
+
+#### G5 - Integration validation, documentation and packaging
+
+Scope: necessary integration tests, actual desktop UX checks, README/CHANGELOG/
+VERIFICATION updates and deliberate packaging allowlist updates for GUI assets.
+Select the next version when preparing that release; do not bump it during planning.
+
+Acceptance: tests and manifest/syntax checks pass; packaged VSIX includes all GUI
+assets and no secrets/unrelated files. In an Extension Development Host, check
+OpenGUI -> filter/select problem -> open code, repeated open/close, keyboard use,
+themes and narrow layouts. Verify Run/Submit dispatch and unsaved-buffer handling
+with mocks; report authenticated/live submission and desktop checks as unverified
+unless actually performed. No installation into the user's live editor without
+authorization. Do not expand this into another architecture review.
+
+Commit: `build: package and document the LeetCode dashboard`
+
+### Dashboard progress
+
+- [x] Feasibility and interaction plan recorded; no extra installation required.
+- [ ] G1: dashboard shell and action bridge.
+- [ ] G2: discovery and local solutions.
+- [ ] G3: current-problem actions and results.
+- [ ] G4: account controls and command discoverability.
+- [ ] G5: integration validation, documentation and packaging.
