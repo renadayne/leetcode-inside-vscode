@@ -61,11 +61,22 @@ async function createController(vscode, context, dependencies = {}) {
     catch { return undefined; }
   }
 
+  function clearCurrentProgress() {
+    if (current) {
+      current = { ...current, status: null };
+      if (panel) {
+        panel.webview.html = description(current);
+      }
+    }
+  }
+
   async function verifiedAuth() {
+    const rawSaved = await context.secrets.get(SECRET);
     let auth;
     try {
       auth = await getAuth(true);
     } catch (error) {
+      clearCurrentProgress();
       if (error.code === 'CREDENTIALS') {
         discovery.setAccountState('expired', { detail: error.message });
         setStatus('Reconnect needed');
@@ -73,24 +84,40 @@ async function createController(vscode, context, dependencies = {}) {
         discovery.setAccountState('signed_out');
         setStatus('Disconnected');
       }
+      error.preserveAccountState = true;
       throw error;
     }
+    const startGen = discovery.accountGeneration;
     try {
       const user = await api.account(auth);
+      if (disposed || discovery.accountGeneration !== startGen || (await context.secrets.get(SECRET)) !== rawSaved) {
+        throw Object.assign(new LcError('ACCOUNT', 'The LeetCode account state changed during verification. Try again.'), { preserveAccountState: true });
+      }
+      const prevUser = discovery.account.username;
+      if (prevUser && prevUser !== user) clearCurrentProgress();
       discovery.setAccountState('verified', { username: user, auth });
+      await discovery.persistFilters();
       setStatus(user);
       if (discovery.initialized) {
         await discovery.refreshAll();
       }
       return { auth, user };
     } catch (error) {
+      if (error?.preserveAccountState || disposed || discovery.accountGeneration !== startGen || (await context.secrets.get(SECRET)) !== rawSaved) {
+        if (error && typeof error === 'object') error.preserveAccountState = true;
+        throw error;
+      }
+      clearCurrentProgress();
       if (error.code === 'AUTH' && !error.redirected) {
         discovery.setAccountState('expired', { detail: error.message });
+        await discovery.persistFilters();
         setStatus('Reconnect needed');
       } else {
         discovery.setAccountState('unavailable', { detail: error instanceof LcError ? error.message : 'Account verification unavailable.' });
+        await discovery.persistFilters();
         setStatus('Verification unavailable');
       }
+      if (error && typeof error === 'object') error.preserveAccountState = true;
       throw error;
     }
   }
@@ -99,12 +126,16 @@ async function createController(vscode, context, dependencies = {}) {
     if (disposed) return;
     // Never expose arbitrary exception text: errors can include headers or tokens.
     const message = error instanceof LcError ? error.message : 'The operation failed locally. Check that the LeetCode solutions folder is accessible; your existing code has not been replaced.';
-    if (error?.code === 'AUTH' && !error?.redirected) {
-      discovery.setAccountState('expired', { detail: message });
-      setStatus('Reconnect needed');
-    } else if (error?.code === 'FORBIDDEN' || error?.redirected) {
-      discovery.setAccountState('unavailable', { detail: message });
-      setStatus('Verification unavailable');
+    if (!error?.preserveAccountState) {
+      if (error?.code === 'AUTH' && !error?.redirected) {
+        clearCurrentProgress();
+        discovery.setAccountState('expired', { detail: message });
+        setStatus('Reconnect needed');
+      } else if (error?.code === 'FORBIDDEN' || error?.redirected) {
+        clearCurrentProgress();
+        discovery.setAccountState('unavailable', { detail: message });
+        setStatus('Verification unavailable');
+      }
     }
     output.appendLine(`\n${message}`);
     output.show(true);
@@ -139,7 +170,10 @@ async function createController(vscode, context, dependencies = {}) {
 
   async function selectedProblem() {
     const uri = vscode.window.activeTextEditor?.document.uri;
-    if (isRegistered(uri)) return store.registered(uri.fsPath);
+    if (isRegistered(uri)) {
+      const q = await store.registered(uri.fsPath);
+      return { ...q, status: null };
+    }
     if (current) return current;
     throw new LcError('SELECTION', 'Open a LeetCode problem first.');
   }
@@ -215,15 +249,29 @@ async function createController(vscode, context, dependencies = {}) {
       if (session === undefined) return;
       const csrf = await vscode.window.showInputBox({ title: 'LeetCode: csrftoken', prompt: 'Paste the csrftoken cookie value only.', password: true, ignoreFocusOut: true });
       if (csrf === undefined) return;
-      const auth = credentials(session, csrf);
-      const user = await api.account(auth);
+      let auth;
+      let user;
+      const startGen = discovery.accountGeneration;
+      try {
+        auth = credentials(session, csrf);
+        user = await api.account(auth);
+      } catch (error) {
+        if (error && typeof error === 'object') error.preserveAccountState = true;
+        throw error;
+      }
+      if (disposed || discovery.accountGeneration !== startGen) {
+        throw Object.assign(new LcError('ACCOUNT', 'The LeetCode account changed during session import. Try again.'), { preserveAccountState: true });
+      }
+      const prevUser = discovery.account.username;
       internalSecretWrite = true;
       try {
         await context.secrets.store(SECRET, JSON.stringify(auth));
       } finally {
         internalSecretWrite = false;
       }
+      if (prevUser && prevUser !== user) clearCurrentProgress();
       discovery.setAccountState('verified', { username: user, auth });
+      await discovery.persistFilters();
       setStatus(user);
       if (discovery.initialized) {
         await discovery.refreshAll();
@@ -377,7 +425,7 @@ async function createController(vscode, context, dependencies = {}) {
 
   async function filterStatus() {
     if (!discovery.isVerified) {
-      throw new LcError('AUTH', 'Check Saved Session or Import Session to verify your LeetCode account before filtering by progress.');
+      throw Object.assign(new LcError('AUTH', 'Check Saved Session or Import Session to verify your LeetCode account before filtering by progress.'), { preserveAccountState: true });
     }
     const items = [
       { label: 'All Problems', value: 'ALL' },
@@ -457,6 +505,7 @@ async function createController(vscode, context, dependencies = {}) {
     } finally {
       internalSecretWrite = false;
     }
+    clearCurrentProgress();
     discovery.setAccountState('signed_out');
     await discovery.persistFilters();
     setStatus('Disconnected');
@@ -526,6 +575,7 @@ async function createController(vscode, context, dependencies = {}) {
     context.subscriptions.push(context.secrets.onDidChange(async e => {
       if (disposed || internalSecretWrite || (e?.key && e.key !== SECRET)) return;
       const saved = await context.secrets.get(SECRET);
+      clearCurrentProgress();
       discovery.setAccountState(saved ? 'unverified' : 'signed_out');
       await discovery.persistFilters();
       setStatus(saved ? 'Session stored' : 'Disconnected');

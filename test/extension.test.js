@@ -351,3 +351,198 @@ test('Daily Challenge exposes server date, marks failed refreshes as stale witho
   await f.handlers.get('lc.openProblemItem')(dailyChildren[0]);
   assert.equal(await fs.readFile(f.file,'utf8'),'// user solution preserved');
 });
+
+test('browser sign-in returns immediately without prompting cookies or marking connected, and failed replacement preserves prior credentials/state', async t=>{
+  let externalUrl;
+  let calls=0;
+  const f=await fixture(t,async(_p,o)=>{
+    calls++;
+    const session=o.auth?.session;
+    if(session==='alice-valid-session')return {data:{userStatus:{isSignedIn:true,username:'alice'}}};
+    throw new LcError('AUTH','Your LeetCode session is invalid or expired.',true);
+  },{initialSecrets:[['leetcode.session.v1',JSON.stringify({session:'alice-valid-session',csrf:'alice-valid-csrf'})]]});
+  f.vscode.env.openExternal=async uri=>{externalUrl=uri.toString();return true;};
+
+  // Startup with stored secret is 'unverified', never 'verified'.
+  assert.equal(f.controller.discovery.account.kind,'unverified');
+  await f.handlers.get('lc.filterStatus')();
+  assert.match(f.errors.at(-1),/verify your LeetCode account/i);
+  f.errors.length=0;
+
+  // Selecting Open LeetCode Sign-in from Connect Account opens browser and returns without prompting inputs or making network calls.
+  f.vscode.window.showInformationMessage=async()=> 'Open LeetCode Sign-in';
+  f.inputs.push('should-not-be-consumed');
+  await f.handlers.get('lc.connect')();
+  assert.equal(externalUrl,'https://leetcode.com/accounts/login/');
+  assert.equal(calls,0);
+  assert.equal(f.inputs.length,1);
+  assert.equal(f.controller.discovery.account.kind,'unverified');
+  f.inputs.length=0;
+
+  // Verify existing saved session.
+  await f.handlers.get('lc.account')();
+  assert.equal(f.controller.discovery.account.kind,'verified');
+  assert.equal(f.controller.discovery.account.username,'alice');
+
+  // Attempt replacement import with invalid cookie format: previous secret and verified state remain intact.
+  f.inputs.push('bad;cookie','csrf-value-123');
+  await f.handlers.get('lc.importSession')();
+  assert.match(f.errors.at(-1),/Paste only each cookie value/);
+  assert.equal(JSON.parse(f.secrets.get('leetcode.session.v1')).session,'alice-valid-session');
+  assert.equal(f.controller.discovery.account.kind,'verified');
+  assert.equal(f.controller.discovery.account.username,'alice');
+  assert.ok(!f.logs.join('\n').includes('bad;cookie'));
+
+  // Attempt replacement import with rejected remote session: previous secret and verified state remain intact.
+  f.inputs.push('rejected-candidate-session','rejected-candidate-csrf');
+  await f.handlers.get('lc.importSession')();
+  assert.match(f.errors.at(-1),/invalid or expired/);
+  assert.equal(JSON.parse(f.secrets.get('leetcode.session.v1')).session,'alice-valid-session');
+  assert.equal(f.controller.discovery.account.kind,'verified');
+  assert.equal(f.controller.discovery.account.username,'alice');
+  assert.ok(!f.logs.join('\n').includes('rejected-candidate-session'));
+  assert.ok(!f.errors.join('\n').includes('rejected-candidate-session'));
+});
+
+test('challenge/network/redirect failures mark account unavailable while preserving secrets, whereas positive auth expiry marks expired', async t=>{
+  let mode='challenge';
+  const f=await fixture(t,async()=>{
+    if(mode==='challenge')throw new LcError('FORBIDDEN','Cloudflare challenge',true);
+    if(mode==='redirect'){const e=new LcError('AUTH','Redirected',true);e.redirected=true;throw e;}
+    if(mode==='network')throw new LcError('NETWORK','Connection reset');
+    if(mode==='expired')throw new LcError('AUTH','Session expired',true);
+    return {data:{userStatus:{isSignedIn:true,username:'alice'}}};
+  });
+
+  for (const m of ['challenge','redirect','network']) {
+    mode=m;
+    await f.handlers.get('lc.account')();
+    assert.equal(f.controller.discovery.account.kind,'unavailable');
+    assert.ok(f.secrets.has('leetcode.session.v1'));
+  }
+
+  mode='ok';
+  await f.handlers.get('lc.account')();
+  assert.equal(f.controller.discovery.account.kind,'verified');
+  await f.controller.discovery.setStatusFilter('AC');
+  assert.equal(f.controller.discovery.filters.status,'AC');
+
+  // Positive 401/signed-out expiry transitions to 'expired', resets progress filter, and keeps secret until explicit disconnect.
+  mode='expired';
+  await f.handlers.get('lc.account')();
+  assert.equal(f.controller.discovery.account.kind,'expired');
+  assert.equal(f.controller.discovery.filters.status,'ALL');
+  assert.ok(f.secrets.has('leetcode.session.v1'));
+});
+
+test('disconnect, cross-window secret changes, and account switches invalidate delayed responses and clear stale progress', async t=>{
+  let resolveVerify;
+  let markVerifyEntered;
+  let verifyEntered=new Promise(r=>{markVerifyEntered=r;});
+  let verifyGate=new Promise(r=>{resolveVerify=r;});
+  let currentUser='alice';
+  let submitCalls=0;
+  const f=await fixture(t,async(p,o)=>{
+    if(p.endsWith('/submit/')){submitCalls++;return {submission_id:999};}
+    const {query}=o.body;
+    if(query.includes('userStatus')){
+      markVerifyEntered?.();
+      await verifyGate;
+      return {data:{userStatus:{isSignedIn:true,username:currentUser}}};
+    }
+    if(query.includes('activeDailyCodingChallengeQuestion')){
+      return {data:{activeDailyCodingChallengeQuestion:{date:'2026-10-27',link:'/problems/two-sum/',question:{...q,status:'ac'}}}};
+    }
+    return {data:{problemsetQuestionList:{total:1,questions:[{...q,status:'ac'}]}}};
+  });
+
+  // Start submit (which awaits verifiedAuth), wait until userStatus is in flight, then simulate cross-window disconnect.
+  const pendingSubmit=f.handlers.get('lc.submit')();
+  await verifyEntered;
+  await f.context.secrets.delete('leetcode.session.v1');
+  assert.equal(f.controller.discovery.account.kind,'signed_out');
+  resolveVerify();
+  await pendingSubmit;
+
+  // Submit was aborted before posting code, and delayed verification did not restore 'alice'.
+  assert.equal(submitCalls,0);
+  assert.equal(f.controller.discovery.account.kind,'signed_out');
+  assert.match(f.errors.at(-1),/account state changed/i);
+
+  // Now connect as alice, open description & load solved progress, then switch to bob.
+  verifyGate=Promise.resolve();
+  f.inputs.push('alice-session-token','alice-csrf-token');
+  await f.handlers.get('lc.importSession')();
+  await f.handlers.get('lc.refreshCatalog')();
+  await f.controller.discovery.setStatusFilter('AC');
+  await f.handlers.get('lc.description')();
+  assert.equal(f.controller.discovery.catalog.questions[0].status,'ac');
+
+  // Inject stale status:'ac' into local cached metadata on disk and switch account to bob.
+  await fs.writeFile(path.join(f.store.root,'1.two-sum.cpp.json'),JSON.stringify({...q,status:'ac'}));
+  currentUser='bob';
+  f.inputs.push('bob-session-token-1','bob-csrf-token-1');
+  // When bob loads catalog, return status: null for bob.
+  f.controller.api.transport=async(_p,o)=>{
+    const {query}=o.body;
+    if(query.includes('userStatus'))return {data:{userStatus:{isSignedIn:true,username:'bob'}}};
+    if(query.includes('activeDailyCodingChallengeQuestion'))return {data:{activeDailyCodingChallengeQuestion:{date:'2026-10-27',link:'/problems/two-sum/',question:{...q,status:null}}}};
+    return {data:{problemsetQuestionList:{total:1,questions:[{...q,status:null}]}}};
+  };
+  await f.handlers.get('lc.importSession')();
+  assert.equal(f.controller.discovery.account.username,'bob');
+  assert.equal(f.controller.discovery.filters.status,'ALL');
+  assert.equal(f.controller.discovery.catalog.questions[0].status,null);
+
+  // Reopening description from local registered file ignores stale 'ac' in disk JSON.
+  await f.handlers.get('lc.description')();
+  assert.match(f.panels[0].webview.html,/Status unavailable \/ unsolved/);
+});
+
+test('completed official submit and resume refresh visible progress without failing when refresh errors, while test runs never refresh progress', async t=>{
+  let solved=false;
+  let failRefresh=false;
+  let catalogCalls=0;
+  const f=await fixture(t,async(p,o)=>{
+    if(p.includes('interpret_solution'))return {interpret_id:'run_1'};
+    if(p.endsWith('/submit/'))return {submission_id:777};
+    if(p.endsWith('/check/'))return {state:'SUCCESS',status_code:10,status_msg:'Accepted',correct_answer:true};
+    const {query}=o.body;
+    if(query.includes('userStatus'))return {data:{userStatus:{isSignedIn:true,username:'test-user'}}};
+    if(query.includes('activeDailyCodingChallengeQuestion')){
+      if(failRefresh)throw new LcError('NETWORK','Refresh failed');
+      return {data:{activeDailyCodingChallengeQuestion:{date:'2026-10-27',link:'/problems/two-sum/',question:{...q,status:solved?'ac':null}}}};
+    }
+    if(query.includes('problemsetQuestionList')){
+      catalogCalls++;
+      if(failRefresh)throw new LcError('NETWORK','Refresh failed');
+      return {data:{problemsetQuestionList:{total:1,questions:[{...q,status:solved?'ac':null}]}}};
+    }
+    throw new Error('unexpected query');
+  });
+
+  await f.handlers.get('lc.account')();
+  await f.controller.discovery.refreshAll();
+  assert.equal(f.controller.discovery.catalog.questions[0].status,null);
+  const callsAfterInit=catalogCalls;
+
+  // Running examples ('lc.run') must not mark solved or refresh catalog beyond account verification.
+  await f.handlers.get('lc.run')();
+  assert.equal(f.controller.discovery.catalog.questions[0].status,null);
+  assert.equal(catalogCalls,callsAfterInit+1); // verifiedAuth refreshed once before test run, no post-run refresh
+
+  // Official submit refreshes visible progress to 'ac'.
+  solved=true;
+  await f.handlers.get('lc.submit')();
+  assert.equal(f.errors.length,0);
+  assert.equal(f.controller.discovery.catalog.questions[0].status,'ac');
+  assert.equal(f.controller.discovery.daily.data.question.status,'ac');
+
+  // If post-submit or post-resume refresh fails, the submission/resume still succeeds without error.
+  failRefresh=true;
+  await f.store.acquire({token:'11111111-1111-1111-1111-111111111111',kind:'submit',id:'888',slug:'two-sum',title:'Two Sum',number:'1',user:'test-user',file:f.file,version:1,hash:'abc',startedAt:'2026-10-27T00:00:00Z'});
+  await f.handlers.get('lc.resume')();
+  assert.equal(f.errors.length,0);
+  assert.match(f.logs.join('\n'),/OFFICIAL LEETCODE SUBMISSION[^]*Verdict: Accepted/);
+});
+

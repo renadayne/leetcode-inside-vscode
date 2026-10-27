@@ -366,7 +366,7 @@ class DiscoveryState {
       throw new LcError('INPUT', 'Invalid progress filter.');
     }
     if (upper !== 'ALL' && !this.isVerified) {
-      throw new LcError('AUTH', 'Verify your LeetCode session before filtering by account progress.');
+      throw Object.assign(new LcError('AUTH', 'Verify your LeetCode session before filtering by account progress.'), { preserveAccountState: true });
     }
     this.filters.status = upper;
     this.skip = 0;
