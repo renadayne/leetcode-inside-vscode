@@ -733,10 +733,11 @@ test('G1: dashboard enforces strict CSP, loads bundled assets, escapes untrusted
   assert.ok(!serializedMessages.includes('secret-csrf-value-888'));
   assert.equal('auth' in f.controller.dashboard.lastState.account,false);
 
-  // Active G2/G3 actions and honest G4 planned labels are present.
+  // Active Explore, Current Problem, and Account labels are present without G1-G4 planning jargon.
   assert.match(html,/Open Daily Challenge/);
   assert.match(html,/Run Examples/);
-  assert.match(html,/Advanced: Import Session \(G4\)/);
+  assert.match(html,/Advanced: Import Session/);
+  assert.doesNotMatch(html,/\(G[1-4]\)/);
 });
 
 test('G1: dashboard message bridge validates allowlisted actions, surfaces loading/error/retry states, and rejects malformed or unknown payloads', async t=>{
@@ -782,11 +783,11 @@ test('G1: dashboard message bridge validates allowlisted actions, surfaces loadi
     assert.equal(f.controller.dashboard.lastState.destination,dest);
   }
 
-  // Valid-shaped G4 actions return honest UNIMPLEMENTED status and set a dismissible notice.
-  const [unimpl]=await panel.emitMessage({action:'accountAction',kind:'openSignIn'});
-  assert.equal(unimpl.ok,false);
-  assert.equal(unimpl.code,'UNIMPLEMENTED');
-  assert.match(f.controller.dashboard.lastState.notice.message,/scheduled for G4/i);
+  // Action errors set a dismissible notice that can be cleared via dismissNotice.
+  const [notFoundRes]=await panel.emitMessage({action:'openLocal',titleSlug:'missing-local-slug'});
+  assert.equal(notFoundRes.ok,false);
+  assert.equal(notFoundRes.code,'NOT_FOUND');
+  assert.match(f.controller.dashboard.lastState.notice.message,/not found/i);
 
   const [dismissRes]=await panel.emitMessage({action:'dismissNotice'});
   assert.equal(dismissRes.ok,true);
@@ -1283,6 +1284,186 @@ test('G3: dashboard prevents duplicate requests while busy, surfaces pending job
   assert.equal(revealedFolder,f.store.root);
   assert.equal(panel.htmlWriteCount,1);
 });
+
+test('G4: dashboard Account controls execute openSignIn, checkSession, importSession, and disconnect via shared flows, synchronize sidebar and description progress, preserve prior credentials on failed import, and never expose secrets to webview', async t=>{
+  let externalUrl=null;
+  let networkCalls=0;
+  let activeRemoteUser='alice';
+
+  const f=await fixture(t,async(_p,o)=>{
+    networkCalls++;
+    const {query}=o.body;
+    const session=o.auth?.session;
+    if(query.includes('userStatus')){
+      if(session==='alice-session-secret-111')return {data:{userStatus:{isSignedIn:true,username:'alice'}}};
+      if(session==='bob-session-secret-222')return {data:{userStatus:{isSignedIn:true,username:'bob'}}};
+      throw new LcError('AUTH','Your LeetCode session is invalid or expired.',true);
+    }
+    if(query.includes('activeDailyCodingChallengeQuestion')){
+      return {data:{activeDailyCodingChallengeQuestion:{
+        date:'2026-10-27',
+        link:'/problems/two-sum/',
+        question:{...q,status:activeRemoteUser==='alice'?'ac':null}
+      }}};
+    }
+    if(query.includes('problemsetQuestionList')){
+      return {data:{problemsetQuestionList:{
+        total:1,
+        questions:[{...q,status:activeRemoteUser==='alice'?'ac':null}]
+      }}};
+    }
+    if(query.includes('questionData')){
+      return {data:{question:{...q,codeSnippets:[{langSlug:'cpp',code:'class Solution {};'}],status:activeRemoteUser==='alice'?'ac':null}}};
+    }
+    throw new Error('unexpected query');
+  },{initialSecrets:[['leetcode.session.v1',JSON.stringify({session:'alice-session-secret-111',csrf:'alice-csrf-secret-111'})]]});
+
+  f.vscode.env.openExternal=async uri=>{externalUrl=uri.toString();return true;};
+
+  const panel=await f.handlers.get('lc.openGUI')();
+  await f.controller.discovery.refreshAll();
+  await f.controller.dashboard.refresh();
+  assert.equal(panel.htmlWriteCount,1);
+  assert.equal(f.controller.dashboard.lastState.account.kind,'unverified');
+  assert.equal(f.controller.dashboard.lastState.account.summary,'Session stored (unverified)');
+
+  // Navigate to Account tab and click Open LeetCode Sign-in: opens browser without prompting cookies or marking connected.
+  await panel.emitMessage({action:'navigate',destination:'account'});
+  const callsBeforeSignIn=networkCalls;
+  f.inputs.push('must-not-be-read');
+  const [signInRes]=await panel.emitMessage({action:'accountAction',kind:'openSignIn'});
+  assert.deepEqual(signInRes,{ok:true,action:'accountAction',kind:'openSignIn'});
+  assert.equal(externalUrl,'https://leetcode.com/accounts/login/');
+  assert.equal(networkCalls,callsBeforeSignIn);
+  assert.equal(f.inputs.length,1);
+  assert.equal(f.controller.dashboard.lastState.account.kind,'unverified');
+  f.inputs.length=0;
+
+  // Check Saved Session verifies 'alice' and synchronizes both dashboard and sidebar.
+  const [checkRes]=await panel.emitMessage({action:'accountAction',kind:'checkSession'});
+  assert.deepEqual(checkRes,{ok:true,action:'accountAction',kind:'checkSession'});
+  assert.equal(f.controller.dashboard.lastState.account.kind,'verified');
+  assert.equal(f.controller.dashboard.lastState.account.username,'alice');
+  assert.equal(f.controller.dashboard.lastState.daily.question.progress,'Solved');
+  assert.equal(f.controller.dashboard.lastState.catalog.questions[0].progress,'Solved');
+  const sidebarAccountAfterCheck=(await f.controller.explorer.getChildren())[0];
+  assert.equal(sidebarAccountAfterCheck.description,'Verified: alice');
+
+  // Enable progress filter ('AC') and open problem description while verified as alice.
+  await panel.emitMessage({action:'setFilters',filters:{status:'AC'}});
+  await panel.emitMessage({action:'openProblem',titleSlug:'two-sum'});
+  const descPanel=f.panels.find(p=>p.viewType==='lc.problem');
+  assert.match(descPanel.webview.html,/Easy · Solved/);
+
+  // Failed session import (invalid cookie format and rejected remote session) preserves alice's stored credentials and verified state.
+  f.inputs.push('bad;cookie','csrf-123456');
+  const [badFormatImport]=await panel.emitMessage({action:'accountAction',kind:'importSession'});
+  assert.equal(badFormatImport.ok,false);
+  assert.equal(badFormatImport.code,'CREDENTIALS');
+  assert.equal(JSON.parse(f.secrets.get('leetcode.session.v1')).session,'alice-session-secret-111');
+  assert.equal(f.controller.dashboard.lastState.account.kind,'verified');
+  assert.equal(f.controller.dashboard.lastState.account.username,'alice');
+
+  f.inputs.push('rejected-session-token-999','rejected-csrf-token-999');
+  const [rejectedImport]=await panel.emitMessage({action:'accountAction',kind:'importSession'});
+  assert.equal(rejectedImport.ok,false);
+  assert.equal(rejectedImport.code,'AUTH');
+  assert.equal(JSON.parse(f.secrets.get('leetcode.session.v1')).session,'alice-session-secret-111');
+  assert.equal(f.controller.dashboard.lastState.account.kind,'verified');
+  assert.equal(f.controller.dashboard.lastState.account.username,'alice');
+
+  // Valid replacement import for 'bob' updates SecretStorage, synchronizes sidebar + dashboard, and clears alice's solved status in description.
+  activeRemoteUser='bob';
+  f.inputs.push('bob-session-secret-222','bob-csrf-secret-222');
+  const [bobImport]=await panel.emitMessage({action:'accountAction',kind:'importSession'});
+  assert.deepEqual(bobImport,{ok:true,action:'accountAction',kind:'importSession'});
+  assert.equal(f.controller.dashboard.lastState.account.kind,'verified');
+  assert.equal(f.controller.dashboard.lastState.account.username,'bob');
+  assert.equal(f.controller.dashboard.lastState.daily.question.progress,'Not started');
+  assert.equal(f.controller.dashboard.lastState.catalog.questions[0].progress,'Not started');
+  assert.match(descPanel.webview.html,/Status unavailable \/ unsolved/);
+  const sidebarAccountAfterBob=(await f.controller.explorer.getChildren())[0];
+  assert.equal(sidebarAccountAfterBob.description,'Verified: bob');
+
+  // Disconnect via dashboard removes stored secret, resets progress filter to ALL, clears progress, and preserves local C++ file.
+  await fs.writeFile(f.file,'// local work preserved across disconnect');
+  const [discRes]=await panel.emitMessage({action:'accountAction',kind:'disconnect'});
+  assert.deepEqual(discRes,{ok:true,action:'accountAction',kind:'disconnect'});
+  assert.equal(f.secrets.size,0);
+  assert.equal(f.controller.dashboard.lastState.account.kind,'signed_out');
+  assert.equal(f.controller.dashboard.lastState.catalog.filters.status,'ALL');
+  assert.equal(f.controller.dashboard.lastState.daily.question.progress,null);
+  assert.equal((await f.controller.explorer.getChildren())[0].description,'Signed out');
+  assert.equal(await fs.readFile(f.file,'utf8'),'// local work preserved across disconnect');
+
+  // Verify no session or CSRF secret ever entered webview HTML or posted messages.
+  const allMessagesJson=JSON.stringify(panel.postedMessages);
+  for(const secretVal of ['alice-session-secret-111','alice-csrf-secret-111','bob-session-secret-222','bob-csrf-secret-222','rejected-session-token-999','bad;cookie']){
+    assert.ok(!panel.webview.html.includes(secretVal));
+    assert.ok(!allMessagesJson.includes(secretVal));
+  }
+  assert.equal(panel.htmlWriteCount,1);
+});
+
+test('G4: package.json hides internal button-only commands from Command Palette while retaining all command registrations, direct shortcuts, and editor/view menus', async t=>{
+  const manifest=JSON.parse(await fs.readFile(path.resolve(__dirname,'..','package.json'),'utf8'));
+  const f=await fixture(t);
+
+  const declaredIds=manifest.contributes.commands.map(c=>c.command);
+  assert.equal(declaredIds.length,29);
+  for(const id of declaredIds){
+    assert.ok(f.handlers.has(id),`Expected command handler registered for ${id}`);
+  }
+
+  const paletteEntries=manifest.contributes.menus.commandPalette||[];
+  const hiddenInPalette=new Set(paletteEntries.filter(e=>e.when==='false').map(e=>e.command));
+
+  const expectedHidden=[
+    'lc.openProblemItem',
+    'lc.openLocalProblem',
+    'lc.openSignIn',
+    'lc.importSession',
+    'lc.account',
+    'lc.refreshExplorer',
+    'lc.refreshDaily',
+    'lc.refreshCatalog',
+    'lc.filterSearch',
+    'lc.filterDifficulty',
+    'lc.filterTopics',
+    'lc.filterStatus',
+    'lc.clearFilters',
+    'lc.nextPage',
+    'lc.prevPage'
+  ];
+  for(const id of expectedHidden){
+    assert.ok(hiddenInPalette.has(id),`Expected internal command ${id} to be hidden from Command Palette`);
+  }
+
+  const expectedVisible=[
+    'lc.openGUI',
+    'lc.connect',
+    'lc.disconnect',
+    'lc.open',
+    'lc.recent',
+    'lc.description',
+    'lc.run',
+    'lc.custom',
+    'lc.runCustom',
+    'lc.submit',
+    'lc.resume',
+    'lc.clearPending',
+    'lc.results',
+    'lc.folder'
+  ];
+  for(const id of expectedVisible){
+    assert.ok(!hiddenInPalette.has(id),`Expected direct command ${id} to remain visible in Command Palette`);
+  }
+
+  // Editor title Run/Submit buttons remain intact.
+  const editorTitleCmds=(manifest.contributes.menus['editor/title']||[]).map(e=>e.command);
+  assert.deepEqual(editorTitleCmds,['lc.run','lc.submit']);
+});
+
 
 
 

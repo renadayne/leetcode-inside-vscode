@@ -679,15 +679,63 @@
     body.appendChild(list);
   }
 
-  function renderAccount(account) {
+  function formatAccountGuidance(account, busy) {
+    if (busy) {
+      return 'A remote or account operation is currently in progress. Wait for it to finish before checking, importing, or disconnecting a session.';
+    }
+    if (!account) {
+      return 'Browser sign-in alone never marks VS Code connected. Credentials are kept in VS Code SecretStorage.';
+    }
+    if (account.detail) {
+      return account.detail;
+    }
+    if (account.kind === 'verified') {
+      return 'Connected and verified as ' + (account.username || 'LeetCode user') + '. Remote runs, official submissions, and account progress filters are enabled.';
+    }
+    if (account.kind === 'unverified') {
+      return 'A session is stored in VS Code SecretStorage, but has not been verified in this window yet. Click "Check Saved Session" to verify it and enable progress filters.';
+    }
+    if (account.kind === 'expired') {
+      return 'Your stored LeetCode session expired or was signed out. Sign in via your browser and use "Advanced: Import Session" to replace the stored cookies, or click "Disconnect Account" to remove them.';
+    }
+    if (account.kind === 'unavailable') {
+      return 'Account verification could not be completed due to a network or service challenge. Your saved session is preserved in SecretStorage; click "Check Saved Session" to retry when connectivity recovers.';
+    }
+    return 'No LeetCode session is stored in VS Code. Anonymous browsing and opening public problems work without an account. To run remote tests, submit solutions, or filter by progress, sign in on leetcode.com and use "Advanced: Import Session".';
+  }
+
+  function renderAccount(state) {
+    const account = state.account;
     const statusText = document.getElementById('lc-account-status-text');
     const detailText = document.getElementById('lc-account-detail-text');
     if (statusText && account) {
       statusText.textContent = 'Status: ' + (account.summary || 'Signed out');
     }
-    if (detailText && account) {
-      detailText.textContent = account.detail || 'Browser sign-in alone never marks VS Code connected. Credentials are kept in VS Code SecretStorage.';
+    if (detailText) {
+      detailText.textContent = formatAccountGuidance(account, state.busy);
     }
+    const canAccountBusyFree = !state.busy;
+    const canDisconnect = Boolean(!state.busy && account && account.kind !== 'signed_out');
+    updateButtonState(
+      'lc-account-checkSession',
+      canAccountBusyFree,
+      'Verify the saved session in VS Code SecretStorage against LeetCode',
+      'Finish the current operation before checking your session'
+    );
+    updateButtonState(
+      'lc-account-disconnect',
+      canDisconnect,
+      'Remove the saved LeetCode session from VS Code SecretStorage',
+      state.busy
+        ? 'Finish the current operation before disconnecting'
+        : 'No saved session in SecretStorage to disconnect'
+    );
+    updateButtonState(
+      'lc-account-importSession',
+      canAccountBusyFree,
+      'Import LEETCODE_SESSION and csrftoken via native masked VS Code input dialogs',
+      'Finish the current operation before importing a session'
+    );
   }
 
   function restoreFocusByKey(focusKey) {
@@ -716,7 +764,7 @@
     renderDaily(state.daily);
     renderCatalog(state.catalog, state.account);
     renderLocal(state.localProblems);
-    renderAccount(state.account);
+    renderAccount(state);
     restoreFocusByKey(activeFocusKey);
 
     if (vscode && typeof vscode.setState === 'function') {
@@ -806,6 +854,11 @@
       const kind = target.getAttribute('data-kind');
       if (kind) {
         postAction({ action: 'problemAction', kind: kind });
+      }
+    } else if (action === 'accountAction') {
+      const kind = target.getAttribute('data-kind');
+      if (kind) {
+        postAction({ action: 'accountAction', kind: kind });
       }
     }
   });

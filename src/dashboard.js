@@ -39,11 +39,10 @@ const G1_ACTIVE_ACTIONS = new Set([
   'clearFilters',
   'loadTopics',
   'changePage',
-  'problemAction'
-]);
-const PLANNED_ACTIONS = new Set([
+  'problemAction',
   'accountAction'
 ]);
+const PLANNED_ACTIONS = new Set([]);
 const VALID_PROBLEM_ACTIONS = new Set([
   'openCode',
   'description',
@@ -319,17 +318,19 @@ function validateDashboardMessage(raw) {
     return { ok: true, action: 'problemAction', payload: { kind: raw.kind } };
   }
 
-  if (PLANNED_ACTIONS.has(action)) {
-    if (action === 'accountAction') {
-      if (!hasOnlyAllowedKeys(raw, new Set(['action', 'type', 'kind'])) || typeof raw.kind !== 'string' || !VALID_ACCOUNT_ACTIONS.has(raw.kind)) {
-        return { ok: false, code: 'INVALID_MESSAGE', message: 'Invalid account action kind.' };
-      }
+  if (action === 'accountAction') {
+    if (!hasOnlyAllowedKeys(raw, new Set(['action', 'type', 'kind'])) || typeof raw.kind !== 'string' || !VALID_ACCOUNT_ACTIONS.has(raw.kind)) {
+      return { ok: false, code: 'INVALID_MESSAGE', message: 'Invalid account action kind.' };
     }
+    return { ok: true, action: 'accountAction', payload: { kind: raw.kind } };
+  }
+
+  if (PLANNED_ACTIONS.has(action)) {
     return {
       ok: false,
       code: 'UNIMPLEMENTED',
       action,
-      message: `Action "${action}" is scheduled for G4 (Account controls). Use the LeetCode sidebar Account section until G4 is completed.`
+      message: `Action "${action}" is not available.`
     };
   }
 
@@ -416,6 +417,30 @@ function summarizeResultForView(record) {
     stdout: formatResultFieldValue(r.std_output ?? r.code_output),
     startedAt: job.startedAt ? boundText(job.startedAt, 40) : null
   };
+}
+
+function formatAccountGuidance(account, busy) {
+  if (busy) {
+    return 'A remote or account operation is currently in progress. Wait for it to finish before checking, importing, or disconnecting a session.';
+  }
+  if (!account) {
+    return 'Browser sign-in alone never marks VS Code connected. Credentials are kept in VS Code SecretStorage.';
+  }
+  if (account.detail) {
+    return account.detail;
+  }
+  switch (account.kind) {
+    case 'verified':
+      return `Connected and verified as ${account.username || 'LeetCode user'}. Remote runs, official submissions, and account progress filters are enabled.`;
+    case 'unverified':
+      return 'A session is stored in VS Code SecretStorage, but has not been verified in this window yet. Click "Check Saved Session" to verify it and enable progress filters.';
+    case 'expired':
+      return 'Your stored LeetCode session expired or was signed out. Sign in via your browser and use "Advanced: Import Session" to replace the stored cookies, or click "Disconnect Account" to remove them.';
+    case 'unavailable':
+      return 'Account verification could not be completed due to a network or service challenge. Your saved session is preserved in SecretStorage; click "Check Saved Session" to retry when connectivity recovers.';
+    default:
+      return 'No LeetCode session is stored in VS Code. Anonymous browsing and opening public problems work without an account. To run remote tests, submit solutions, or filter by progress, sign in on leetcode.com and use "Advanced: Import Session".';
+  }
 }
 
 function computeActionHint(state) {
@@ -603,6 +628,7 @@ class LeetCodeDashboard {
     this.openProblemBySlug = options.openProblemBySlug;
     this.openLocalProblem = options.openLocalProblem;
     this.executeProblemAction = options.executeProblemAction;
+    this.executeAccountAction = options.executeAccountAction;
     this.isBusy = options.isBusy || (() => false);
     this.getPendingJob = options.getPendingJob || (async () => undefined);
     this.getLastResult = options.getLastResult || (async () => undefined);
@@ -750,7 +776,6 @@ class LeetCodeDashboard {
     const busy = Boolean(this.isBusy());
 
     return {
-      phase: 'G3',
       destination: VALID_DESTINATIONS.has(this.destination) ? this.destination : 'explore',
       busy,
       notice: this.notice ? { kind: this.notice.kind, code: this.notice.code, message: boundText(this.notice.message, 240) } : null,
@@ -1080,6 +1105,17 @@ class LeetCodeDashboard {
         await this.refresh();
         return { ok: true, action: 'problemAction', kind };
       }
+
+      if (validated.action === 'accountAction') {
+        const { kind } = validated.payload;
+        if (typeof this.executeAccountAction !== 'function') {
+          throw new LcError('UNSUPPORTED', 'Account actions are not configured.');
+        }
+        this.notice = null;
+        await this.executeAccountAction(kind);
+        await this.refresh();
+        return { ok: true, action: 'accountAction', kind };
+      }
     } catch (error) {
       return this._reportActionError(error, 'The dashboard action could not be completed.');
     }
@@ -1112,6 +1148,8 @@ class LeetCodeDashboard {
     const canExecuteSolution = Boolean(current && current.editorOpen && !state.busy && !state.pendingJob);
     const canRunTests = Boolean(canExecuteSolution && current.enableRunCode !== false);
     const canManagePending = Boolean(state.pendingJob && !state.busy);
+    const canAccountBusyFree = !state.busy;
+    const canDisconnect = Boolean(!state.busy && state.account.kind !== 'signed_out');
 
     const noticeHtml = state.notice?.message
       ? `<div id="lc-notice-region"><div class="lc-notice${state.notice.kind === 'error' ? ' lc-notice-error' : state.notice.kind === 'warning' ? ' lc-notice-warning' : ''}" role="${state.notice.kind === 'error' ? 'alert' : 'status'}"><span>${escape(state.notice.message)}</span><button type="button" class="lc-btn lc-btn-secondary" data-action="dismissNotice">Dismiss</button></div></div>`
@@ -1260,14 +1298,22 @@ class LeetCodeDashboard {
             <h2 class="lc-card-title">Account &amp; Session Status</h2>
           </div>
           <p id="lc-account-status-text" class="lc-item-title">Status: ${escape(state.account.summary)}</p>
-          <p id="lc-account-detail-text" class="lc-muted">${escape(state.account.detail || 'Browser sign-in alone never marks VS Code connected. Credentials are kept in VS Code SecretStorage.')}</p>
+          <p id="lc-account-detail-text" class="lc-muted">${escape(formatAccountGuidance(state.account, state.busy))}</p>
           <div class="lc-action-row">
-            <button type="button" class="lc-btn lc-btn-secondary" disabled title="Planned in G4: Open LeetCode Sign-in in browser.">Open LeetCode Sign-in (G4)</button>
-            <button type="button" class="lc-btn lc-btn-secondary" disabled title="Planned in G4: Check Saved Session in SecretStorage.">Check Saved Session (G4)</button>
-            <button type="button" class="lc-btn lc-btn-secondary" disabled title="Planned in G4: Advanced: Import Session via native masked input dialogs.">Advanced: Import Session (G4)</button>
-            <button type="button" class="lc-btn lc-btn-secondary" disabled title="Planned in G4: Disconnect Account from VS Code.">Disconnect Account (G4)</button>
+            <button type="button" id="lc-account-openSignIn" class="lc-btn" data-action="accountAction" data-kind="openSignIn" data-focus-key="account:openSignIn" title="Open leetcode.com/accounts/login/ in your default browser (browser sign-in does not automatically transfer cookies to VS Code)">Open LeetCode Sign-in</button>
+            <button type="button" id="lc-account-checkSession" class="lc-btn lc-btn-secondary" data-action="accountAction" data-kind="checkSession" data-focus-key="account:checkSession"${canAccountBusyFree ? '' : ' disabled'} title="${canAccountBusyFree ? 'Verify the saved session in VS Code SecretStorage against LeetCode' : 'Finish the current operation before checking your session'}">Check Saved Session</button>
+            <button type="button" id="lc-account-disconnect" class="lc-btn lc-btn-secondary" data-action="accountAction" data-kind="disconnect" data-focus-key="account:disconnect"${canDisconnect ? '' : ' disabled'} title="${canDisconnect ? 'Remove the saved LeetCode session from VS Code SecretStorage' : (state.busy ? 'Finish the current operation before disconnecting' : 'No saved session in SecretStorage to disconnect')}">Disconnect Account</button>
           </div>
-          <p class="lc-muted">Account actions in the dashboard are scheduled for G4. Credentials are never collected in HTML; use the LeetCode sidebar Account section until G4 is completed.</p>
+        </article>
+
+        <article class="lc-card" aria-label="Advanced Session Import">
+          <div class="lc-card-header">
+            <h2 class="lc-card-title">Advanced: Import Session</h2>
+          </div>
+          <p class="lc-muted">Browser sign-in does not transfer cookies automatically. Use Advanced: Import Session to paste <code>LEETCODE_SESSION</code> and <code>csrftoken</code> values into VS Code's native masked input dialogs. Credentials are validated before saving to VS Code SecretStorage and are never entered or stored in this webview.</p>
+          <div class="lc-action-row">
+            <button type="button" id="lc-account-importSession" class="lc-btn lc-btn-secondary" data-action="accountAction" data-kind="importSession" data-focus-key="account:importSession"${canAccountBusyFree ? '' : ' disabled'} title="${canAccountBusyFree ? 'Import LEETCODE_SESSION and csrftoken via native masked VS Code input dialogs' : 'Finish the current operation before importing a session'}">Advanced: Import Session</button>
+          </div>
         </article>
       </section>
     </main>

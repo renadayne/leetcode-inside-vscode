@@ -49,6 +49,7 @@ async function createController(vscode, context, dependencies = {}) {
     openProblemBySlug: (slug, preview) => openProblemBySlug(slug, preview),
     openLocalProblem: problem => openLocalProblemItem(problem),
     executeProblemAction: kind => executeProblemAction(kind),
+    executeAccountAction: kind => executeAccountAction(kind),
     isBusy: () => remoteBusy || Boolean(jobs.busy) || connecting,
     getPendingJob: () => store.pending(),
     getLastResult: async () => lastPresentedResult || await store.readJSON('last-result.json'),
@@ -677,6 +678,50 @@ async function createController(vscode, context, dependencies = {}) {
     }
   }
 
+  async function checkSavedSession() {
+    if (connecting || remoteBusy || jobs.busy) {
+      throw new LcError('BUSY', 'Finish the current account or remote operation first.');
+    }
+    const { user } = await verifiedAuth();
+    await vscode.window.showInformationMessage(`LeetCode session is valid: ${user}`);
+  }
+
+  async function disconnectAccount() {
+    if (remoteBusy || jobs.busy || connecting) throw new LcError('BUSY', 'Finish or stop waiting for the current operation before disconnecting.');
+    internalSecretWrite = true;
+    try {
+      await context.secrets.delete(SECRET);
+    } finally {
+      internalSecretWrite = false;
+    }
+    clearCurrentProgress();
+    discovery.setAccountState('signed_out');
+    await discovery.persistFilters();
+    setStatus('Disconnected');
+    if (discovery.initialized) {
+      await discovery.refreshAll();
+    }
+    if (dashboard && dashboard.isOpen) {
+      await dashboard.refresh();
+    }
+    await vscode.window.showInformationMessage('LeetCode session removed from VS Code. Pending operations and local code are preserved.');
+  }
+
+  async function executeAccountAction(kind) {
+    switch (kind) {
+      case 'openSignIn':
+        return openSignIn();
+      case 'checkSession':
+        return checkSavedSession();
+      case 'importSession':
+        return importSession();
+      case 'disconnect':
+        return disconnectAccount();
+      default:
+        throw new LcError('UNSUPPORTED', 'Unsupported account action.');
+    }
+  }
+
   async function updateEditorContext(editor) {
     const uri = editor?.document?.uri;
     const isSolution = isRegistered(uri) && Boolean(findOpenDocument(uri));
@@ -697,27 +742,8 @@ async function createController(vscode, context, dependencies = {}) {
   command('lc.connect', connect);
   command('lc.openSignIn', openSignIn);
   command('lc.importSession', importSession);
-  command('lc.account', async () => { const { user } = await verifiedAuth(); await vscode.window.showInformationMessage(`LeetCode session is valid: ${user}`); });
-  command('lc.disconnect', async () => {
-    if (remoteBusy || jobs.busy || connecting) throw new LcError('BUSY', 'Finish or stop waiting for the current operation before disconnecting.');
-    internalSecretWrite = true;
-    try {
-      await context.secrets.delete(SECRET);
-    } finally {
-      internalSecretWrite = false;
-    }
-    clearCurrentProgress();
-    discovery.setAccountState('signed_out');
-    await discovery.persistFilters();
-    setStatus('Disconnected');
-    if (discovery.initialized) {
-      await discovery.refreshAll();
-    }
-    if (dashboard && dashboard.isOpen) {
-      await dashboard.refresh();
-    }
-    await vscode.window.showInformationMessage('LeetCode session removed from VS Code. Pending operations and local code are preserved.');
-  });
+  command('lc.account', checkSavedSession);
+  command('lc.disconnect', disconnectAccount);
   command('lc.open', openProblem);
   command('lc.openProblemItem', async item => {
     const problem = item?.problem || (typeof item === 'object' ? item : undefined);
@@ -765,6 +791,9 @@ async function createController(vscode, context, dependencies = {}) {
       setStatus(saved ? 'Session stored' : 'Disconnected');
       if (discovery.initialized) {
         await discovery.refreshAll();
+      }
+      if (dashboard && dashboard.isOpen) {
+        await dashboard.refresh();
       }
     }));
   }

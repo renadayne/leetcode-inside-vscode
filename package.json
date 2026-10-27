@@ -67,6 +67,23 @@
       { "command": "lc.folder", "title": "LeetCode: Open Local Solutions Folder" }
     ],
     "menus": {
+      "commandPalette": [
+        { "command": "lc.openProblemItem", "when": "false" },
+        { "command": "lc.openLocalProblem", "when": "false" },
+        { "command": "lc.openSignIn", "when": "false" },
+        { "command": "lc.importSession", "when": "false" },
+        { "command": "lc.account", "when": "false" },
+        { "command": "lc.refreshExplorer", "when": "false" },
+        { "command": "lc.refreshDaily", "when": "false" },
+        { "command": "lc.refreshCatalog", "when": "false" },
+        { "command": "lc.filterSearch", "when": "false" },
+        { "command": "lc.filterDifficulty", "when": "false" },
+        { "command": "lc.filterTopics", "when": "false" },
+        { "command": "lc.filterStatus", "when": "false" },
+        { "command": "lc.clearFilters", "when": "false" },
+        { "command": "lc.nextPage", "when": "false" },
+        { "command": "lc.prevPage", "when": "false" }
+      ],
       "editor/title": [
         { "command": "lc.run", "when": "resourceScheme == file && resourceExtname == .cpp && lc.isSolution", "group": "navigation@1" },
         { "command": "lc.submit", "when": "resourceScheme == file && resourceExtname == .cpp && lc.isSolution", "group": "navigation@2" }
